@@ -1,0 +1,22 @@
+# VothostX
+
+Generate and host websites from a text prompt.
+**Powered by Alphatekx.**
+
+## Stack
+- **Cloudflare Workers** — hosting + API
+- **Cloudflare D1** — projects database
+- **Cloudflare Custom Hostnames** — user-owned domains
+- **Groq API** (Llama 3.3 70B) — AI code generation
+
+## Features
+- Generate full HTML/CSS/JS sites from a prompt
+- Every site gets its own URL: `projectid.vothostx.com`
+- Connect custom domains via Cloudflare Custom Hostnames
+- Served from the edge, worldwide
+
+## Local Development
+
+1. Install dependencies:
+   ```bash
+   npm install
