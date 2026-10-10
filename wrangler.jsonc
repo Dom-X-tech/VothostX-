@@ -5,8 +5,8 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "vothostx-db",
-      "database_id": "YOUR_DATABASE_ID_HERE"
+      "database_name": "vothostx",
+      "database_id": "37d6d6c1-5e34-4ec4-b217-c819480d3ba5"
     }
   ]
 }
