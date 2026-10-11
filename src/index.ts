@@ -1,5 +1,5 @@
 // ============================================================
-// VothostX Worker — Auth + API + generated-site host
+// VothostX Worker — Password + Magic-link auth, API, site host
 // Powered by Alphatekx
 // ============================================================
 
@@ -16,9 +16,10 @@ const PROJECT_PATH_PREFIX = "/p/";
 const SESSION_COOKIE = "vx_session";
 const SESSION_DAYS = 30;
 const MAGIC_MINUTES = 15;
+const VERIFY_HOURS = 24;
 const FROM_EMAIL = "VothostX <onboarding@resend.dev>";
+const MIN_PASSWORD_LENGTH = 8;
 
-// Allowed origins for CORS (must match exactly — wildcards break credentials)
 const ALLOWED_ORIGINS = [
   "https://vothostx.pages.dev",
   "https://vhostx.zone.id",
@@ -28,10 +29,9 @@ const ALLOWED_ORIGINS = [
 function corsHeaders(request: Request): Record<string, string> {
   const origin = request.headers.get("origin") || "";
   const allowed = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
-
   return {
     "Access-Control-Allow-Origin": allowed,
-    "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
     "Access-Control-Allow-Credentials": "true",
     "Access-Control-Max-Age": "86400",
@@ -70,6 +70,67 @@ function parseCookies(header: string | null): Record<string, string> {
   return out;
 }
 
+// ---------- Password hashing (PBKDF2 via Web Crypto) ----------
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(hex.substr(i * 2, 2), 16);
+  }
+  return out;
+}
+
+async function hashPassword(password: string): Promise<string> {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const enc = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(password),
+    "PBKDF2",
+    false,
+    ["deriveBits"]
+  );
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt, iterations: 100000, hash: "SHA-256" },
+    keyMaterial,
+    256
+  );
+  return `${bytesToHex(salt)}:${bytesToHex(new Uint8Array(bits))}`;
+}
+
+async function verifyPassword(password: string, stored: string): Promise<boolean> {
+  const [saltHex, hashHex] = stored.split(":");
+  if (!saltHex || !hashHex) return false;
+  const salt = hexToBytes(saltHex);
+  const enc = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(password),
+    "PBKDF2",
+    false,
+    ["deriveBits"]
+  );
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt, iterations: 100000, hash: "SHA-256" },
+    keyMaterial,
+    256
+  );
+  const computed = bytesToHex(new Uint8Array(bits));
+  // constant-time-ish compare
+  if (computed.length !== hashHex.length) return false;
+  let diff = 0;
+  for (let i = 0; i < computed.length; i++) {
+    diff |= computed.charCodeAt(i) ^ hashHex.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+// ---------- Worker entry ----------
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (request.method === "OPTIONS") {
@@ -89,7 +150,6 @@ export default {
           )
             .bind(id)
             .first<{ code: string }>();
-
           if (project) {
             return new Response(project.code, {
               headers: { "content-type": "text/html;charset=utf-8" },
@@ -106,8 +166,14 @@ export default {
     }
 
     // ---- Auth routes ----
+    if (path === "/api/auth/signup" && request.method === "POST") {
+      return authSignup(request, env);
+    }
+    if (path === "/api/auth/login" && request.method === "POST") {
+      return authLogin(request, env);
+    }
     if (path === "/api/auth/request" && request.method === "POST") {
-      return authRequest(request, env);
+      return authRequestMagic(request, env);
     }
     if (path === "/api/auth/verify" && request.method === "GET") {
       return authVerify(request, env);
@@ -119,7 +185,7 @@ export default {
       return authLogout(request, env);
     }
 
-    // ---- Project routes (auth required) ----
+    // ---- Project routes ----
     if (path === "/api/generate" && request.method === "POST") {
       return generateSite(request, env);
     }
@@ -141,7 +207,7 @@ export default {
 };
 
 // ============================================================
-// AUTH
+// SESSION HELPERS
 // ============================================================
 
 async function getSessionUser(request: Request, env: Env) {
@@ -170,7 +236,202 @@ async function getSessionUser(request: Request, env: Env) {
   return user ?? null;
 }
 
-async function authRequest(request: Request, env: Env): Promise<Response> {
+async function createSession(userId: string, env: Env): Promise<string> {
+  const sid = randomToken(32);
+  const expires = Math.floor(Date.now() / 1000) + SESSION_DAYS * 86400;
+  await env.DB.prepare(
+    "INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)"
+  )
+    .bind(sid, userId, expires)
+    .run();
+  return sid;
+}
+
+function sessionCookie(sid: string): string {
+  return [
+    `${SESSION_COOKIE}=${sid}`,
+    "Path=/",
+    "HttpOnly",
+    "Secure",
+    "SameSite=None",
+    `Max-Age=${SESSION_DAYS * 86400}`,
+  ].join("; ");
+}
+
+function clearCookie(): string {
+  return `${SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=0`;
+}
+
+// ============================================================
+// AUTH — SIGNUP
+// ============================================================
+
+async function authSignup(request: Request, env: Env): Promise<Response> {
+  let body: { email?: string; password?: string };
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: "Invalid JSON" }, 400, request);
+  }
+
+  const email = body.email?.trim().toLowerCase();
+  const password = body.password ?? "";
+
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return json({ error: "Valid email required" }, 400, request);
+  }
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    return json(
+      { error: `Password must be at least ${MIN_PASSWORD_LENGTH} characters` },
+      400,
+      request
+    );
+  }
+
+  const existing = await env.DB.prepare(
+    "SELECT id, verified FROM users WHERE email = ?"
+  )
+    .bind(email)
+    .first<{ id: string; verified: number }>();
+
+  if (existing && existing.verified) {
+    return json(
+      { error: "Account already exists. Please sign in." },
+      409,
+      request
+    );
+  }
+
+  const passwordHash = await hashPassword(password);
+
+  let userId: string;
+  if (existing) {
+    // User existed but wasn't verified — update password and resend verification
+    userId = existing.id;
+    await env.DB.prepare("UPDATE users SET password_hash = ? WHERE id = ?")
+      .bind(passwordHash, userId)
+      .run();
+  } else {
+    userId = crypto.randomUUID();
+    await env.DB.prepare(
+      "INSERT INTO users (id, email, password_hash, verified) VALUES (?, ?, ?, 0)"
+    )
+      .bind(userId, email, passwordHash)
+      .run();
+  }
+
+  // Send verification email
+  const token = randomToken(32);
+  const expiresAt = Math.floor(Date.now() / 1000) + VERIFY_HOURS * 3600;
+
+  await env.DB.prepare(
+    "INSERT INTO magic_tokens (token, user_id, expires_at, used) VALUES (?, ?, ?, 0)"
+  )
+    .bind(token, userId, expiresAt)
+    .run();
+
+  const origin = request.headers.get("origin") || "https://vothostx.pages.dev";
+  const link = `${origin}/verify?token=${token}`;
+
+  const emailRes = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: FROM_EMAIL,
+      to: [email],
+      subject: `Verify your ${BRAND} account`,
+      html: verifyEmailHtml(link),
+    }),
+  });
+
+  if (!emailRes.ok) {
+    const errText = await emailRes.text();
+    console.error("Resend error:", emailRes.status, errText);
+    return json(
+      { error: `Email send failed: ${errText.slice(0, 200)}` },
+      500,
+      request
+    );
+  }
+
+  return json(
+    {
+      ok: true,
+      message: "Account created. Check your inbox to verify your email.",
+    },
+    200,
+    request
+  );
+}
+
+// ============================================================
+// AUTH — LOGIN
+// ============================================================
+
+async function authLogin(request: Request, env: Env): Promise<Response> {
+  let body: { email?: string; password?: string };
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: "Invalid JSON" }, 400, request);
+  }
+
+  const email = body.email?.trim().toLowerCase();
+  const password = body.password ?? "";
+
+  if (!email || !password) {
+    return json({ error: "Email and password required" }, 400, request);
+  }
+
+  const user = await env.DB.prepare(
+    "SELECT id, email, password_hash, verified FROM users WHERE email = ?"
+  )
+    .bind(email)
+    .first<{
+      id: string;
+      email: string;
+      password_hash: string | null;
+      verified: number;
+    }>();
+
+  if (!user || !user.password_hash) {
+    return json({ error: "Invalid email or password" }, 401, request);
+  }
+
+  const ok = await verifyPassword(password, user.password_hash);
+  if (!ok) {
+    return json({ error: "Invalid email or password" }, 401, request);
+  }
+
+  if (!user.verified) {
+    return json(
+      { error: "Please verify your email first. Check your inbox." },
+      403,
+      request
+    );
+  }
+
+  const sid = await createSession(user.id, env);
+
+  return json(
+    {
+      ok: true,
+      user: { id: user.id, email: user.email, verified: user.verified },
+    },
+    200,
+    request,
+    { "Set-Cookie": sessionCookie(sid) }
+  );
+}
+
+// ============================================================
+// AUTH — MAGIC LINK REQUEST
+// ============================================================
+
+async function authRequestMagic(request: Request, env: Env): Promise<Response> {
   let body: { email?: string };
   try {
     body = await request.json();
@@ -183,18 +444,17 @@ async function authRequest(request: Request, env: Env): Promise<Response> {
     return json({ error: "Valid email required" }, 400, request);
   }
 
-  let user = await env.DB.prepare("SELECT id, email FROM users WHERE email = ?")
+  const user = await env.DB.prepare("SELECT id, email FROM users WHERE email = ?")
     .bind(email)
     .first<{ id: string; email: string }>();
 
+  // Don't leak whether the account exists — always respond success
   if (!user) {
-    const userId = crypto.randomUUID();
-    await env.DB.prepare(
-      "INSERT INTO users (id, email, verified) VALUES (?, ?, 0)"
-    )
-      .bind(userId, email)
-      .run();
-    user = { id: userId, email };
+    return json(
+      { ok: true, message: "If that account exists, a link has been sent." },
+      200,
+      request
+    );
   }
 
   const token = randomToken(32);
@@ -206,10 +466,8 @@ async function authRequest(request: Request, env: Env): Promise<Response> {
     .bind(token, user.id, expiresAt)
     .run();
 
-  // Where the magic link should land — always the frontend
-  const frontendOrigin =
-    request.headers.get("origin") || "https://vothostx.pages.dev";
-  const link = `${frontendOrigin}/verify?token=${token}`;
+  const origin = request.headers.get("origin") || "https://vothostx.pages.dev";
+  const link = `${origin}/verify?token=${token}`;
 
   const emailRes = await fetch("https://api.resend.com/emails", {
     method: "POST",
@@ -242,6 +500,10 @@ async function authRequest(request: Request, env: Env): Promise<Response> {
   );
 }
 
+// ============================================================
+// AUTH — VERIFY (works for both signup-verify and magic link)
+// ============================================================
+
 async function authVerify(request: Request, env: Env): Promise<Response> {
   const token = new URL(request.url).searchParams.get("token");
   if (!token) return json({ error: "Missing token" }, 400, request);
@@ -265,31 +527,16 @@ async function authVerify(request: Request, env: Env): Promise<Response> {
     .bind(row.user_id)
     .run();
 
-  const sid = randomToken(32);
-  const expires = Math.floor(Date.now() / 1000) + SESSION_DAYS * 86400;
+  const sid = await createSession(row.user_id, env);
 
-  await env.DB.prepare(
-    "INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)"
-  )
-    .bind(sid, row.user_id, expires)
-    .run();
-
-  const cookie = [
-    `${SESSION_COOKIE}=${sid}`,
-    "Path=/",
-    "HttpOnly",
-    "Secure",
-    "SameSite=None",
-    `Max-Age=${SESSION_DAYS * 86400}`,
-  ].join("; ");
-
-  return json(
-    { ok: true, message: "Signed in" },
-    200,
-    request,
-    { "Set-Cookie": cookie }
-  );
+  return json({ ok: true, message: "Signed in" }, 200, request, {
+    "Set-Cookie": sessionCookie(sid),
+  });
 }
+
+// ============================================================
+// AUTH — ME / LOGOUT
+// ============================================================
 
 async function authMe(request: Request, env: Env): Promise<Response> {
   const user = await getSessionUser(request, env);
@@ -307,12 +554,11 @@ async function authLogout(request: Request, env: Env): Promise<Response> {
   if (sid) {
     await env.DB.prepare("DELETE FROM sessions WHERE id = ?").bind(sid).run();
   }
-  const cookie = `${SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=0`;
-  return json({ ok: true }, 200, request, { "Set-Cookie": cookie });
+  return json({ ok: true }, 200, request, { "Set-Cookie": clearCookie() });
 }
 
 // ============================================================
-// GENERATE (auth required)
+// GENERATE
 // ============================================================
 
 async function generateSite(request: Request, env: Env): Promise<Response> {
@@ -400,36 +646,55 @@ async function generateSite(request: Request, env: Env): Promise<Response> {
 async function listProjects(request: Request, env: Env): Promise<Response> {
   const user = await getSessionUser(request, env);
   if (!user) return json({ error: "Sign in required" }, 401, request);
-
   const rows = await env.DB.prepare(
     "SELECT id, name, prompt, created_at FROM projects WHERE user_id = ? ORDER BY created_at DESC LIMIT 100"
   )
     .bind(user.id)
     .all();
-
   return json({ projects: rows.results ?? [] }, 200, request);
 }
 
 async function getProject(request: Request, env: Env): Promise<Response> {
   const user = await getSessionUser(request, env);
   if (!user) return json({ error: "Sign in required" }, 401, request);
-
   const id = new URL(request.url).searchParams.get("id");
   if (!id) return json({ error: "id required" }, 400, request);
-
   const project = await env.DB.prepare(
     "SELECT id, name, prompt, code, created_at FROM projects WHERE id = ? AND user_id = ?"
   )
     .bind(id, user.id)
     .first();
-
   if (!project) return json({ error: "Not found" }, 404, request);
   return json({ project }, 200, request);
 }
 
 // ============================================================
-// Helpers
+// Email templates
 // ============================================================
+
+function verifyEmailHtml(link: string): string {
+  return `<!DOCTYPE html>
+<html><body style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f5f5f5;padding:40px 20px;">
+  <div style="max-width:480px;margin:0 auto;background:#fff;border-radius:12px;padding:32px;">
+    <h2 style="margin:0 0 12px;color:#0a0a0a;">Verify your ${BRAND} account</h2>
+    <p style="color:#555;line-height:1.6;">
+      Click the button below to verify your email and finish signing up. This link expires in ${VERIFY_HOURS} hours.
+    </p>
+    <p style="text-align:center;margin:32px 0;">
+      <a href="${link}" style="background:#10b981;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block;">
+        Verify email
+      </a>
+    </p>
+    <p style="color:#999;font-size:12px;margin-top:32px;">
+      Or paste this into your browser:<br>
+      <span style="color:#10b981;word-break:break-all;">${link}</span>
+    </p>
+    <p style="color:#999;font-size:12px;border-top:1px solid #eee;padding-top:16px;margin-top:24px;">
+      Powered by ${PARENT_BRAND}
+    </p>
+  </div>
+</body></html>`;
+}
 
 function magicEmailHtml(link: string): string {
   return `<!DOCTYPE html>
@@ -445,7 +710,7 @@ function magicEmailHtml(link: string): string {
       </a>
     </p>
     <p style="color:#999;font-size:12px;margin-top:32px;">
-      If the button doesn't work, paste this into your browser:<br>
+      Or paste this into your browser:<br>
       <span style="color:#10b981;word-break:break-all;">${link}</span>
     </p>
     <p style="color:#999;font-size:12px;border-top:1px solid #eee;padding-top:16px;margin-top:24px;">
