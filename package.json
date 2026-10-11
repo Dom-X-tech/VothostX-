@@ -7,7 +7,9 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "db:local": "wrangler d1 execute vothostx-db --file=./schema.sql --local",
-    "db:init": "wrangler d1 execute vothostx-db --file=./schema.sql --remote"
+    "db:init": "wrangler d1 execute vothostx-db --file=./schema.sql --remote",
+    "db:auth:local": "wrangler d1 execute vothostx --file=./migrations/0001_auth_tables.sql --local",
+    "db:auth:remote": "wrangler d1 execute vothostx --file=./migrations/0001_auth_tables.sql --remote"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250101.0",

@@ -20,3 +20,10 @@ Generate and host websites from a text prompt.
 1. Install dependencies:
    ```bash
    npm install
+   ```
+
+## Authentication database
+
+Apply the authentication tables to the local D1 database with `npm run db:auth:local`.
+Apply them to the configured remote D1 database with `npm run db:auth:remote`.
+The migration is safe to rerun and preserves existing users and tokens.
