@@ -1,263 +1,469 @@
-import { useEffect, useState } from "react";
+// ============================================================
+// VothostX Worker — Auth + API + generated-site host
+// Powered by Alphatekx
+// ============================================================
 
-const API_URL =
-  import.meta.env.VITE_API_URL || "https://vothostx.domx28718.workers.dev";
+interface Env {
+  DB: D1Database;
+  GROQ_API_KEY: string;
+  RESEND_API_KEY: string;
+}
 
 const BRAND = "VothostX";
 const PARENT_BRAND = "Alphatekx";
+const DEFAULT_MODEL = "openai/gpt-oss-120b";
+const PROJECT_PATH_PREFIX = "/p/";
+const SESSION_COOKIE = "vx_session";
+const SESSION_DAYS = 30;
+const MAGIC_MINUTES = 15;
+const FROM_EMAIL = "VothostX <onboarding@resend.dev>";
 
-type User = { id: string; email: string; verified: number };
-type Result = { id: string; code: string; url: string };
+// Allowed origins for CORS (must match exactly — wildcards break credentials)
+const ALLOWED_ORIGINS = [
+  "https://vothostx.pages.dev",
+  "https://vhostx.zone.id",
+  "http://localhost:5173",
+];
 
-export default function App() {
-  const [user, setUser] = useState<User | null>(null);
-  const [loadingMe, setLoadingMe] = useState(true);
-  const [email, setEmail] = useState("");
-  const [sendingLink, setSendingLink] = useState(false);
-  const [authMsg, setAuthMsg] = useState("");
+function corsHeaders(request: Request): Record<string, string> {
+  const origin = request.headers.get("origin") || "";
+  const allowed = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
 
-  const [prompt, setPrompt] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<Result | null>(null);
-  const [error, setError] = useState("");
+  return {
+    "Access-Control-Allow-Origin": allowed,
+    "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Credentials": "true",
+    "Access-Control-Max-Age": "86400",
+  };
+}
 
-  // If the URL has ?token=... → call verify endpoint
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const token = params.get("token");
-    if (token && window.location.pathname === "/verify") {
-      fetch(`${API_URL}/api/auth/verify?token=${token}`, {
-        credentials: "include",
-      })
-        .then((r) => r.json())
-        .then((d) => {
-          if (d.ok) {
-            window.history.replaceState({}, "", "/");
-            return fetchMe();
-          } else {
-            setAuthMsg(`Verification failed: ${d.error}`);
+function json(
+  body: unknown,
+  status: number,
+  request: Request,
+  extraHeaders: Record<string, string> = {}
+): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "content-type": "application/json",
+      ...corsHeaders(request),
+      ...extraHeaders,
+    },
+  });
+}
+
+function randomToken(bytes = 32): string {
+  const arr = new Uint8Array(bytes);
+  crypto.getRandomValues(arr);
+  return Array.from(arr, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function parseCookies(header: string | null): Record<string, string> {
+  if (!header) return {};
+  const out: Record<string, string> = {};
+  for (const part of header.split(";")) {
+    const [k, ...v] = part.trim().split("=");
+    if (k) out[k] = decodeURIComponent(v.join("="));
+  }
+  return out;
+}
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    if (request.method === "OPTIONS") {
+      return new Response(null, { headers: corsHeaders(request) });
+    }
+
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    // ---- Serve generated sites ----
+    if (path.startsWith(PROJECT_PATH_PREFIX)) {
+      const id = path.slice(PROJECT_PATH_PREFIX.length).split("/")[0];
+      if (id) {
+        try {
+          const project = await env.DB.prepare(
+            "SELECT code FROM projects WHERE id = ?"
+          )
+            .bind(id)
+            .first<{ code: string }>();
+
+          if (project) {
+            return new Response(project.code, {
+              headers: { "content-type": "text/html;charset=utf-8" },
+            });
           }
-        })
-        .finally(() => setLoadingMe(false));
-    } else {
-      fetchMe();
+        } catch (e) {
+          console.error("Project lookup error:", e);
+        }
+        return new Response(notFoundPage(id), {
+          status: 404,
+          headers: { "content-type": "text/html;charset=utf-8" },
+        });
+      }
     }
-  }, []);
 
-  async function fetchMe() {
-    try {
-      const res = await fetch(`${API_URL}/api/auth/me`, {
-        credentials: "include",
-      });
-      const data = await res.json();
-      setUser(data.user);
-    } catch {
-      setUser(null);
-    } finally {
-      setLoadingMe(false);
+    // ---- Auth routes ----
+    if (path === "/api/auth/request" && request.method === "POST") {
+      return authRequest(request, env);
     }
-  }
-
-  async function requestLink() {
-    if (!email.trim()) return;
-    setSendingLink(true);
-    setAuthMsg("");
-    try {
-      const res = await fetch(`${API_URL}/api/auth/request`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ email }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
-      setAuthMsg("Check your inbox for a sign-in link.");
-      setEmail("");
-    } catch (e) {
-      setAuthMsg(e instanceof Error ? e.message : "Something went wrong");
-    } finally {
-      setSendingLink(false);
+    if (path === "/api/auth/verify" && request.method === "GET") {
+      return authVerify(request, env);
     }
-  }
+    if (path === "/api/auth/me" && request.method === "GET") {
+      return authMe(request, env);
+    }
+    if (path === "/api/auth/logout" && request.method === "POST") {
+      return authLogout(request, env);
+    }
 
-  async function logout() {
-    await fetch(`${API_URL}/api/auth/logout`, {
-      method: "POST",
-      credentials: "include",
+    // ---- Project routes (auth required) ----
+    if (path === "/api/generate" && request.method === "POST") {
+      return generateSite(request, env);
+    }
+    if (path === "/api/projects" && request.method === "GET") {
+      return listProjects(request, env);
+    }
+    if (path === "/api/project" && request.method === "GET") {
+      return getProject(request, env);
+    }
+
+    if (path === "/api/health") {
+      return json({ ok: true, brand: BRAND, parent: PARENT_BRAND }, 200, request);
+    }
+
+    return new Response(rootPage(), {
+      headers: { "content-type": "text/html;charset=utf-8" },
     });
-    setUser(null);
-    setResult(null);
+  },
+};
+
+// ============================================================
+// AUTH
+// ============================================================
+
+async function getSessionUser(request: Request, env: Env) {
+  const cookies = parseCookies(request.headers.get("cookie"));
+  const sid = cookies[SESSION_COOKIE];
+  if (!sid) return null;
+
+  const session = await env.DB.prepare(
+    "SELECT user_id, expires_at FROM sessions WHERE id = ?"
+  )
+    .bind(sid)
+    .first<{ user_id: string; expires_at: number }>();
+
+  if (!session) return null;
+  if (session.expires_at < Math.floor(Date.now() / 1000)) {
+    await env.DB.prepare("DELETE FROM sessions WHERE id = ?").bind(sid).run();
+    return null;
   }
 
-  async function generate() {
-    if (!prompt.trim()) return;
-    setLoading(true);
-    setError("");
-    setResult(null);
-    try {
-      const res = await fetch(`${API_URL}/api/generate`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ prompt }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Generation failed");
-      setResult(data);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Something went wrong");
-    } finally {
-      setLoading(false);
-    }
+  const user = await env.DB.prepare(
+    "SELECT id, email, verified FROM users WHERE id = ?"
+  )
+    .bind(session.user_id)
+    .first<{ id: string; email: string; verified: number }>();
+
+  return user ?? null;
+}
+
+async function authRequest(request: Request, env: Env): Promise<Response> {
+  let body: { email?: string };
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: "Invalid JSON" }, 400, request);
   }
 
-  if (loadingMe) {
-    return (
-      <div className="app">
-        <div className="loading">Loading…</div>
-      </div>
+  const email = body.email?.trim().toLowerCase();
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return json({ error: "Valid email required" }, 400, request);
+  }
+
+  let user = await env.DB.prepare("SELECT id, email FROM users WHERE email = ?")
+    .bind(email)
+    .first<{ id: string; email: string }>();
+
+  if (!user) {
+    const userId = crypto.randomUUID();
+    await env.DB.prepare(
+      "INSERT INTO users (id, email, verified) VALUES (?, ?, 0)"
+    )
+      .bind(userId, email)
+      .run();
+    user = { id: userId, email };
+  }
+
+  const token = randomToken(32);
+  const expiresAt = Math.floor(Date.now() / 1000) + MAGIC_MINUTES * 60;
+
+  await env.DB.prepare(
+    "INSERT INTO magic_tokens (token, user_id, expires_at, used) VALUES (?, ?, ?, 0)"
+  )
+    .bind(token, user.id, expiresAt)
+    .run();
+
+  // Where the magic link should land — always the frontend
+  const frontendOrigin =
+    request.headers.get("origin") || "https://vothostx.pages.dev";
+  const link = `${frontendOrigin}/verify?token=${token}`;
+
+  const emailRes = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: FROM_EMAIL,
+      to: [email],
+      subject: `Sign in to ${BRAND}`,
+      html: magicEmailHtml(link),
+    }),
+  });
+
+  if (!emailRes.ok) {
+    const errText = await emailRes.text();
+    console.error("Resend error:", emailRes.status, errText);
+    return json(
+      { error: `Email send failed: ${errText.slice(0, 200)}` },
+      500,
+      request
     );
   }
 
-  return (
-    <div className="app">
-      <header className="header">
-        <div className="logo">
-          Vothost<span>X</span>
-        </div>
-        <div className="header-right">
-          {user ? (
-            <>
-              <span className="user-email">{user.email}</span>
-              <button className="btn-ghost" onClick={logout}>
-                Sign out
-              </button>
-            </>
-          ) : (
-            <span className="parent">Powered by {PARENT_BRAND}</span>
-          )}
-        </div>
-      </header>
-
-      <main className="main">
-        {!user ? (
-          <>
-            <h1>
-              Sign in to <span>{BRAND}</span>
-            </h1>
-            <p className="sub">
-              Enter your email. We'll send you a one-time link. No password needed.
-            </p>
-            <input
-              className="input"
-              type="email"
-              placeholder="you@example.com"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && requestLink()}
-              disabled={sendingLink}
-            />
-            <button
-              className="btn"
-              onClick={requestLink}
-              disabled={sendingLink || !email.trim()}
-            >
-              {sendingLink ? "Sending…" : "Send sign-in link"}
-            </button>
-            {authMsg && <p className="status">{authMsg}</p>}
-          </>
-        ) : (
-          <>
-            <h1>
-              Describe it. <span>We build &amp; host it.</span>
-            </h1>
-            <p className="sub">
-              Type what you want. {BRAND} generates a full website and hosts it.
-            </p>
-
-            <textarea
-              className="textarea"
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              placeholder="A landing page for a coffee shop with menu, hours, and location map"
-              disabled={loading}
-            />
-
-            <button
-              className="btn"
-              onClick={generate}
-              disabled={loading || !prompt.trim()}
-            >
-              {loading ? "Generating…" : "Generate Website"}
-            </button>
-
-            {error && <p className="error">Error: {error}</p>}
-            {loading && <p className="status">AI is writing your website…</p>}
-
-            {result && (
-              <>
-                <p className="success">Done! Your site is live.</p>
-                <iframe
-                  className="preview"
-                  srcDoc={result.code}
-                  sandbox="allow-scripts allow-forms allow-popups allow-modals"
-                  title="Preview"
-                />
-                <div className="meta">
-                  <p>
-                    <strong>Project ID:</strong> <code>{result.id}</code>
-                  </p>
-                  <p>
-                    <strong>Live URL:</strong>{" "}
-                    <a href={result.url} target="_blank" rel="noreferrer">
-                      {result.url}
-                    </a>
-                  </p>
-                </div>
-              </>
-            )}
-          </>
-        )}
-      </main>
-
-      <footer className="footer">
-        Powered by <strong>{PARENT_BRAND}</strong>
-      </footer>
-
-      <style>{styles}</style>
-    </div>
+  return json(
+    { ok: true, message: "Check your inbox for a sign-in link." },
+    200,
+    request
   );
 }
 
-const styles = `
-.app{display:flex;flex-direction:column;min-height:100vh}
-.header{padding:20px 40px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border)}
-.header-right{display:flex;align-items:center;gap:16px}
-.logo{font-size:20px;font-weight:700;letter-spacing:-.5px}
-.logo span{color:var(--accent)}
-.parent{font-size:12px;color:var(--muted)}
-.user-email{font-size:13px;color:var(--muted)}
-.main{flex:1;max-width:900px;margin:0 auto;padding:60px 24px;width:100%}
-h1{font-size:40px;font-weight:700;letter-spacing:-1px;margin-bottom:12px}
-h1 span{color:var(--accent)}
-.sub{color:var(--muted);font-size:17px;margin-bottom:40px;line-height:1.6}
-.input,.textarea{width:100%;padding:16px;font-size:16px;font-family:inherit;border:1px solid var(--border);border-radius:12px;background:var(--panel);color:var(--text)}
-.textarea{height:130px;resize:vertical}
-.input:focus,.textarea:focus{outline:none;border-color:var(--accent)}
-.input:disabled,.textarea:disabled{opacity:.6}
-.btn{margin-top:16px;padding:14px 28px;font-size:15px;font-weight:600;cursor:pointer;background:var(--accent);color:#000;border:none;border-radius:10px}
-.btn:hover:not(:disabled){opacity:.85}
-.btn:disabled{opacity:.4;cursor:not-allowed}
-.btn-ghost{background:transparent;color:var(--muted);border:1px solid var(--border);padding:8px 14px;border-radius:8px;cursor:pointer;font-size:13px}
-.btn-ghost:hover{color:var(--text);border-color:var(--text)}
-.status{color:var(--muted);font-size:14px;margin-top:20px}
-.error{color:#f87171;font-size:14px;margin-top:20px}
-.success{color:var(--accent);font-size:14px;margin-top:24px;margin-bottom:12px}
-.loading{display:flex;align-items:center;justify-content:center;min-height:100vh;color:var(--muted)}
-.preview{width:100%;height:560px;border:1px solid var(--border);border-radius:12px;background:#fff;margin-top:8px}
-.meta{margin-top:20px;padding:20px;background:var(--panel);border:1px solid var(--border);border-radius:12px;font-size:14px;line-height:1.7}
-.meta strong{color:var(--accent)}
-.meta code{background:#000;padding:2px 8px;border-radius:4px;color:var(--accent);font-size:13px}
-.footer{padding:24px;text-align:center;font-size:13px;color:var(--muted);border-top:1px solid var(--border)}
-.footer strong{color:var(--text)}
-`;
+async function authVerify(request: Request, env: Env): Promise<Response> {
+  const token = new URL(request.url).searchParams.get("token");
+  if (!token) return json({ error: "Missing token" }, 400, request);
+
+  const row = await env.DB.prepare(
+    "SELECT user_id, expires_at, used FROM magic_tokens WHERE token = ?"
+  )
+    .bind(token)
+    .first<{ user_id: string; expires_at: number; used: number }>();
+
+  if (!row) return json({ error: "Invalid link" }, 400, request);
+  if (row.used) return json({ error: "Link already used" }, 400, request);
+  if (row.expires_at < Math.floor(Date.now() / 1000)) {
+    return json({ error: "Link expired" }, 400, request);
+  }
+
+  await env.DB.prepare("UPDATE magic_tokens SET used = 1 WHERE token = ?")
+    .bind(token)
+    .run();
+  await env.DB.prepare("UPDATE users SET verified = 1 WHERE id = ?")
+    .bind(row.user_id)
+    .run();
+
+  const sid = randomToken(32);
+  const expires = Math.floor(Date.now() / 1000) + SESSION_DAYS * 86400;
+
+  await env.DB.prepare(
+    "INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)"
+  )
+    .bind(sid, row.user_id, expires)
+    .run();
+
+  const cookie = [
+    `${SESSION_COOKIE}=${sid}`,
+    "Path=/",
+    "HttpOnly",
+    "Secure",
+    "SameSite=None",
+    `Max-Age=${SESSION_DAYS * 86400}`,
+  ].join("; ");
+
+  return json(
+    { ok: true, message: "Signed in" },
+    200,
+    request,
+    { "Set-Cookie": cookie }
+  );
+}
+
+async function authMe(request: Request, env: Env): Promise<Response> {
+  const user = await getSessionUser(request, env);
+  if (!user) return json({ user: null }, 200, request);
+  return json(
+    { user: { id: user.id, email: user.email, verified: user.verified } },
+    200,
+    request
+  );
+}
+
+async function authLogout(request: Request, env: Env): Promise<Response> {
+  const cookies = parseCookies(request.headers.get("cookie"));
+  const sid = cookies[SESSION_COOKIE];
+  if (sid) {
+    await env.DB.prepare("DELETE FROM sessions WHERE id = ?").bind(sid).run();
+  }
+  const cookie = `${SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=0`;
+  return json({ ok: true }, 200, request, { "Set-Cookie": cookie });
+}
+
+// ============================================================
+// GENERATE (auth required)
+// ============================================================
+
+async function generateSite(request: Request, env: Env): Promise<Response> {
+  const user = await getSessionUser(request, env);
+  if (!user) return json({ error: "Sign in required" }, 401, request);
+
+  let body: { prompt?: string };
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: "Body must be valid JSON" }, 400, request);
+  }
+
+  const prompt = body.prompt?.trim();
+  if (!prompt) return json({ error: "Prompt is required" }, 400, request);
+  if (!env.GROQ_API_KEY)
+    return json({ error: "GROQ_API_KEY not configured" }, 500, request);
+
+  const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.GROQ_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: DEFAULT_MODEL,
+      messages: [
+        {
+          role: "system",
+          content:
+            `You are ${BRAND}, an AI website generator powered by ${PARENT_BRAND}. ` +
+            "Return ONLY a complete, valid, single-file HTML document. " +
+            "Include all CSS inside a <style> tag and all JavaScript inside a <script> tag. " +
+            "Do NOT wrap the output in markdown. Return raw HTML starting with <!DOCTYPE html> and nothing else.",
+        },
+        { role: "user", content: prompt },
+      ],
+      temperature: 0.7,
+      max_tokens: 4096,
+    }),
+  });
+
+  if (!groqRes.ok) {
+    const errText = await groqRes.text();
+    console.error("Groq error:", groqRes.status, errText);
+    return json(
+      { error: `Groq ${groqRes.status}: ${errText.slice(0, 200)}` },
+      500,
+      request
+    );
+  }
+
+  const data: any = await groqRes.json();
+  let code: string = data?.choices?.[0]?.message?.content ?? "";
+  if (!code) return json({ error: "Empty AI response" }, 502, request);
+
+  code = code
+    .replace(/^```html\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/```\s*$/i, "")
+    .trim();
+
+  if (
+    !code.toLowerCase().startsWith("<!doctype") &&
+    !code.toLowerCase().startsWith("<html")
+  ) {
+    code = `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>${code}</body></html>`;
+  }
+
+  const id = crypto.randomUUID().slice(0, 8);
+  await env.DB.prepare(
+    "INSERT INTO projects (id, name, prompt, code, user_id) VALUES (?, ?, ?, ?, ?)"
+  )
+    .bind(id, prompt.slice(0, 40), prompt, code, user.id)
+    .run();
+
+  const origin = new URL(request.url).origin;
+  return json(
+    { id, code, url: `${origin}${PROJECT_PATH_PREFIX}${id}` },
+    200,
+    request
+  );
+}
+
+async function listProjects(request: Request, env: Env): Promise<Response> {
+  const user = await getSessionUser(request, env);
+  if (!user) return json({ error: "Sign in required" }, 401, request);
+
+  const rows = await env.DB.prepare(
+    "SELECT id, name, prompt, created_at FROM projects WHERE user_id = ? ORDER BY created_at DESC LIMIT 100"
+  )
+    .bind(user.id)
+    .all();
+
+  return json({ projects: rows.results ?? [] }, 200, request);
+}
+
+async function getProject(request: Request, env: Env): Promise<Response> {
+  const user = await getSessionUser(request, env);
+  if (!user) return json({ error: "Sign in required" }, 401, request);
+
+  const id = new URL(request.url).searchParams.get("id");
+  if (!id) return json({ error: "id required" }, 400, request);
+
+  const project = await env.DB.prepare(
+    "SELECT id, name, prompt, code, created_at FROM projects WHERE id = ? AND user_id = ?"
+  )
+    .bind(id, user.id)
+    .first();
+
+  if (!project) return json({ error: "Not found" }, 404, request);
+  return json({ project }, 200, request);
+}
+
+// ============================================================
+// Helpers
+// ============================================================
+
+function magicEmailHtml(link: string): string {
+  return `<!DOCTYPE html>
+<html><body style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f5f5f5;padding:40px 20px;">
+  <div style="max-width:480px;margin:0 auto;background:#fff;border-radius:12px;padding:32px;">
+    <h2 style="margin:0 0 12px;color:#0a0a0a;">Sign in to ${BRAND}</h2>
+    <p style="color:#555;line-height:1.6;">
+      Click the button below to sign in. This link expires in ${MAGIC_MINUTES} minutes and can only be used once.
+    </p>
+    <p style="text-align:center;margin:32px 0;">
+      <a href="${link}" style="background:#10b981;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block;">
+        Sign in
+      </a>
+    </p>
+    <p style="color:#999;font-size:12px;margin-top:32px;">
+      If the button doesn't work, paste this into your browser:<br>
+      <span style="color:#10b981;word-break:break-all;">${link}</span>
+    </p>
+    <p style="color:#999;font-size:12px;border-top:1px solid #eee;padding-top:16px;margin-top:24px;">
+      Powered by ${PARENT_BRAND}
+    </p>
+  </div>
+</body></html>`;
+}
+
+function rootPage(): string {
+  return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><title>${BRAND} API</title>
+<style>body{font-family:system-ui;background:#0a0a0a;color:#e8e8e8;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}h1{color:#6ee7b7}</style>
+</head><body><div><h1>${BRAND} API</h1><p>Powered by ${PARENT_BRAND}</p></div></body></html>`;
+}
+
+function notFoundPage(id: string): string {
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Not Found</title>
+<style>body{font-family:system-ui;background:#0a0a0a;color:#e8e8e8;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;text-align:center}h1{font-size:60px;color:#6ee7b7;margin:0}</style>
+</head><body><div><h1>404</h1><p>Project not found.</p></div></body></html>`;
+}
