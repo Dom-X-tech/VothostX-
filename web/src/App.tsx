@@ -97,7 +97,12 @@ export default function App() {
         body: JSON.stringify({ email, password }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
+      if (!res.ok) {
+        throw new Error(data.error || `Signup failed (${res.status}). Please try again.`);
+      }
+      if (!data.ok) {
+        throw new Error(data.error || "Signup failed. Please try again.");
+      }
       setMode("sent");
       setAuthMsg("Account created. Check your inbox to verify your email.");
       setPassword("");
@@ -236,59 +241,62 @@ export default function App() {
                 {mode === "magic" && "We'll email you a one-time sign-in link."}
               </p>
 
-              <input
-                className="input"
-                type="email"
-                placeholder="you@example.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                disabled={authBusy}
-                autoComplete="email"
-              />
-
-              {mode !== "magic" && (
-                <input
-                  className="input mt"
-                  type="password"
-                  placeholder="Password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  disabled={authBusy}
-                  autoComplete={mode === "signup" ? "new-password" : "current-password"}
-                />
-              )}
-
-              {mode === "signup" && (
-                <input
-                  className="input mt"
-                  type="password"
-                  placeholder="Confirm password"
-                  value={confirm}
-                  onChange={(e) => setConfirm(e.target.value)}
-                  disabled={authBusy}
-                  autoComplete="new-password"
-                />
-              )}
-
-              <button
-                className="btn"
-                disabled={authBusy || !email.trim()}
-                onClick={
-                  mode === "signup"
-                    ? doSignup
-                    : mode === "signin"
-                    ? doLogin
-                    : doMagicLink
-                }
+              <form
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  if (mode === "signup") void doSignup();
+                  else if (mode === "signin") void doLogin();
+                  else void doMagicLink();
+                }}
               >
-                {authBusy
-                  ? "Working…"
-                  : mode === "signup"
-                  ? "Create account"
-                  : mode === "signin"
-                  ? "Sign in"
-                  : "Send sign-in link"}
-              </button>
+                <input
+                  className="input"
+                  type="email"
+                  placeholder="you@example.com"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  disabled={authBusy}
+                  autoComplete="email"
+                  required
+                />
+
+                {mode !== "magic" && (
+                  <input
+                    className="input mt"
+                    type="password"
+                    placeholder="Password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    disabled={authBusy}
+                    autoComplete={mode === "signup" ? "new-password" : "current-password"}
+                    required
+                    minLength={mode === "signup" ? 8 : undefined}
+                  />
+                )}
+
+                {mode === "signup" && (
+                  <input
+                    className="input mt"
+                    type="password"
+                    placeholder="Confirm password"
+                    value={confirm}
+                    onChange={(e) => setConfirm(e.target.value)}
+                    disabled={authBusy}
+                    autoComplete="new-password"
+                    required
+                  />
+                )}
+
+                <button className="btn" type="submit" disabled={authBusy}>
+                  {authBusy
+                    ? "Working…"
+                    : mode === "signup"
+                    ? "Create account"
+                    : mode === "signin"
+                    ? "Sign in"
+                    : "Send sign-in link"}
+                </button>
+              </form>
 
               {authErr && <p className="error">{authErr}</p>}
 
