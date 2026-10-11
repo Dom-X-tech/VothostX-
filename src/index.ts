@@ -1,314 +1,263 @@
-// ============================================================
-// VothostX Worker — API + generated-site host
-// Powered by Alphatekx
-// ============================================================
+import { useEffect, useState } from "react";
 
-interface Env {
-  DB: D1Database;
-  GROQ_API_KEY: string;
-}
+const API_URL =
+  import.meta.env.VITE_API_URL || "https://vothostx.domx28718.workers.dev";
 
 const BRAND = "VothostX";
 const PARENT_BRAND = "Alphatekx";
-const DEFAULT_MODEL = "openai/gpt-oss-120b";
-const PROJECT_PATH_PREFIX = "/p/";
 
-// CORS — allow the Pages editor to call this Worker
-const CORS: Record<string, string> = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
-  "Access-Control-Max-Age": "86400",
-};
+type User = { id: string; email: string; verified: number };
+type Result = { id: string; code: string; url: string };
 
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json", ...CORS },
-  });
-}
+export default function App() {
+  const [user, setUser] = useState<User | null>(null);
+  const [loadingMe, setLoadingMe] = useState(true);
+  const [email, setEmail] = useState("");
+  const [sendingLink, setSendingLink] = useState(false);
+  const [authMsg, setAuthMsg] = useState("");
 
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    // Preflight
-    if (request.method === "OPTIONS") {
-      return new Response(null, { headers: CORS });
-    }
+  const [prompt, setPrompt] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<Result | null>(null);
+  const [error, setError] = useState("");
 
-    const url = new URL(request.url);
-
-    // --- 1. Serve generated sites at /p/:id ---
-    if (url.pathname.startsWith(PROJECT_PATH_PREFIX)) {
-      const id = url.pathname.slice(PROJECT_PATH_PREFIX.length).split("/")[0];
-      if (id) {
-        try {
-          const project = await env.DB.prepare(
-            "SELECT code FROM projects WHERE id = ?"
-          )
-            .bind(id)
-            .first<{ code: string }>();
-
-          if (project) {
-            return new Response(project.code, {
-              headers: { "content-type": "text/html;charset=utf-8" },
-            });
+  // If the URL has ?token=... → call verify endpoint
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get("token");
+    if (token && window.location.pathname === "/verify") {
+      fetch(`${API_URL}/api/auth/verify?token=${token}`, {
+        credentials: "include",
+      })
+        .then((r) => r.json())
+        .then((d) => {
+          if (d.ok) {
+            window.history.replaceState({}, "", "/");
+            return fetchMe();
+          } else {
+            setAuthMsg(`Verification failed: ${d.error}`);
           }
-        } catch (e) {
-          console.error("Project lookup error:", e);
-        }
-
-        return new Response(notFoundPage(id), {
-          status: 404,
-          headers: { "content-type": "text/html;charset=utf-8" },
-        });
-      }
+        })
+        .finally(() => setLoadingMe(false));
+    } else {
+      fetchMe();
     }
+  }, []);
 
-    // --- 2. API routes ---
-    if (url.pathname === "/api/generate" && request.method === "POST") {
-      return generateSite(request, env);
+  async function fetchMe() {
+    try {
+      const res = await fetch(`${API_URL}/api/auth/me`, {
+        credentials: "include",
+      });
+      const data = await res.json();
+      setUser(data.user);
+    } catch {
+      setUser(null);
+    } finally {
+      setLoadingMe(false);
     }
-
-    if (url.pathname === "/api/project" && request.method === "GET") {
-      return getProject(request, env);
-    }
-
-    if (url.pathname === "/api/health") {
-      return json({ ok: true, brand: BRAND, parent: PARENT_BRAND });
-    }
-
-    // --- 3. Root: informational page (the real editor lives on Pages) ---
-    return new Response(rootPage(), {
-      headers: { "content-type": "text/html;charset=utf-8" },
-    });
-  },
-};
-
-// ============================================================
-// Generate Website
-// ============================================================
-async function generateSite(request: Request, env: Env): Promise<Response> {
-  let body: { prompt?: string };
-  try {
-    body = await request.json();
-  } catch {
-    return json({ error: "Body must be valid JSON" }, 400);
   }
 
-  const prompt = body.prompt?.trim();
-  if (!prompt) return json({ error: "Prompt is required" }, 400);
-
-  if (!env.GROQ_API_KEY) {
-    return json({ error: "GROQ_API_KEY not configured on server" }, 500);
+  async function requestLink() {
+    if (!email.trim()) return;
+    setSendingLink(true);
+    setAuthMsg("");
+    try {
+      const res = await fetch(`${API_URL}/api/auth/request`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ email }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      setAuthMsg("Check your inbox for a sign-in link.");
+      setEmail("");
+    } catch (e) {
+      setAuthMsg(e instanceof Error ? e.message : "Something went wrong");
+    } finally {
+      setSendingLink(false);
+    }
   }
 
-  let groqRes: Response;
-  try {
-    groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+  async function logout() {
+    await fetch(`${API_URL}/api/auth/logout`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.GROQ_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: DEFAULT_MODEL,
-        messages: [
-          {
-            role: "system",
-            content:
-              `You are ${BRAND}, an AI website generator powered by ${PARENT_BRAND}. ` +
-              "Return ONLY a complete, valid, single-file HTML document. " +
-              "Include all CSS inside a <style> tag and all JavaScript inside a <script> tag. " +
-              "Do NOT wrap the output in markdown. Do NOT add explanations. " +
-              "Return raw HTML starting with <!DOCTYPE html> and nothing else.",
-          },
-          { role: "user", content: prompt },
-        ],
-        temperature: 0.7,
-        max_tokens: 4096,
-      }),
+      credentials: "include",
     });
-  } catch (e) {
-    console.error("Groq fetch failed:", e);
-    return json(
-      { error: `Groq unreachable: ${e instanceof Error ? e.message : String(e)}` },
-      502
+    setUser(null);
+    setResult(null);
+  }
+
+  async function generate() {
+    if (!prompt.trim()) return;
+    setLoading(true);
+    setError("");
+    setResult(null);
+    try {
+      const res = await fetch(`${API_URL}/api/generate`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ prompt }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Generation failed");
+      setResult(data);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Something went wrong");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  if (loadingMe) {
+    return (
+      <div className="app">
+        <div className="loading">Loading…</div>
+      </div>
     );
   }
 
-  if (!groqRes.ok) {
-    const errText = await groqRes.text();
-    console.error("Groq error:", groqRes.status, errText);
-    return json(
-      { error: `Groq ${groqRes.status}: ${errText.slice(0, 300)}` },
-      500
-    );
-  }
+  return (
+    <div className="app">
+      <header className="header">
+        <div className="logo">
+          Vothost<span>X</span>
+        </div>
+        <div className="header-right">
+          {user ? (
+            <>
+              <span className="user-email">{user.email}</span>
+              <button className="btn-ghost" onClick={logout}>
+                Sign out
+              </button>
+            </>
+          ) : (
+            <span className="parent">Powered by {PARENT_BRAND}</span>
+          )}
+        </div>
+      </header>
 
-  let data: any;
-  try {
-    data = await groqRes.json();
-  } catch {
-    return json({ error: "Groq returned invalid JSON" }, 502);
-  }
+      <main className="main">
+        {!user ? (
+          <>
+            <h1>
+              Sign in to <span>{BRAND}</span>
+            </h1>
+            <p className="sub">
+              Enter your email. We'll send you a one-time link. No password needed.
+            </p>
+            <input
+              className="input"
+              type="email"
+              placeholder="you@example.com"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && requestLink()}
+              disabled={sendingLink}
+            />
+            <button
+              className="btn"
+              onClick={requestLink}
+              disabled={sendingLink || !email.trim()}
+            >
+              {sendingLink ? "Sending…" : "Send sign-in link"}
+            </button>
+            {authMsg && <p className="status">{authMsg}</p>}
+          </>
+        ) : (
+          <>
+            <h1>
+              Describe it. <span>We build &amp; host it.</span>
+            </h1>
+            <p className="sub">
+              Type what you want. {BRAND} generates a full website and hosts it.
+            </p>
 
-  let code: string = data?.choices?.[0]?.message?.content ?? "";
-  if (!code) return json({ error: "Groq returned empty response" }, 502);
+            <textarea
+              className="textarea"
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              placeholder="A landing page for a coffee shop with menu, hours, and location map"
+              disabled={loading}
+            />
 
-  code = code
-    .replace(/^```html\s*/i, "")
-    .replace(/^```\s*/i, "")
-    .replace(/```\s*$/i, "")
-    .trim();
+            <button
+              className="btn"
+              onClick={generate}
+              disabled={loading || !prompt.trim()}
+            >
+              {loading ? "Generating…" : "Generate Website"}
+            </button>
 
-  if (
-    !code.toLowerCase().startsWith("<!doctype") &&
-    !code.toLowerCase().startsWith("<html")
-  ) {
-    code = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtml(
-      prompt.slice(0, 40)
-    )}</title></head><body>${code}</body></html>`;
-  }
+            {error && <p className="error">Error: {error}</p>}
+            {loading && <p className="status">AI is writing your website…</p>}
 
-  const id = crypto.randomUUID().slice(0, 8);
-  const name = prompt.slice(0, 40);
+            {result && (
+              <>
+                <p className="success">Done! Your site is live.</p>
+                <iframe
+                  className="preview"
+                  srcDoc={result.code}
+                  sandbox="allow-scripts allow-forms allow-popups allow-modals"
+                  title="Preview"
+                />
+                <div className="meta">
+                  <p>
+                    <strong>Project ID:</strong> <code>{result.id}</code>
+                  </p>
+                  <p>
+                    <strong>Live URL:</strong>{" "}
+                    <a href={result.url} target="_blank" rel="noreferrer">
+                      {result.url}
+                    </a>
+                  </p>
+                </div>
+              </>
+            )}
+          </>
+        )}
+      </main>
 
-  try {
-    await env.DB.prepare(
-      "INSERT INTO projects (id, name, prompt, code) VALUES (?, ?, ?, ?)"
-    )
-      .bind(id, name, prompt, code)
-      .run();
-  } catch (e) {
-    console.error("D1 insert failed:", e);
-    return json(
-      { error: `Database error: ${e instanceof Error ? e.message : String(e)}` },
-      500
-    );
-  }
+      <footer className="footer">
+        Powered by <strong>{PARENT_BRAND}</strong>
+      </footer>
 
-  const origin = new URL(request.url).origin;
-  return json({
-    id,
-    code,
-    url: `${origin}${PROJECT_PATH_PREFIX}${id}`,
-  });
+      <style>{styles}</style>
+    </div>
+  );
 }
 
-// ============================================================
-// Get Project Info
-// ============================================================
-async function getProject(request: Request, env: Env): Promise<Response> {
-  const id = new URL(request.url).searchParams.get("id");
-  if (!id) return json({ error: "id required" }, 400);
-
-  try {
-    const project = await env.DB.prepare(
-      "SELECT id, name, prompt, created_at FROM projects WHERE id = ?"
-    )
-      .bind(id)
-      .first();
-
-    if (!project) return json({ error: "Not found" }, 404);
-    return json({ project });
-  } catch {
-    return json({ error: "Database error" }, 500);
-  }
-}
-
-// ============================================================
-// Helpers
-// ============================================================
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-function rootPage(): string {
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>${BRAND} API</title>
-<style>
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: #0a0a0a; color: #e8e8e8;
-    display: flex; align-items: center; justify-content: center;
-    min-height: 100vh; margin: 0; text-align: center;
-    padding: 20px;
-  }
-  .card { max-width: 520px; }
-  h1 { color: #6ee7b7; font-size: 32px; margin: 0 0 8px; }
-  .sub { color: #888; font-size: 14px; margin-bottom: 28px; }
-  ul { list-style: none; padding: 0; text-align: left; }
-  li {
-    background: #141414; border: 1px solid #262626;
-    border-radius: 10px; padding: 14px 18px; margin-bottom: 10px;
-    font-size: 14px;
-  }
-  code { color: #6ee7b7; font-size: 13px; }
-  a { color: #6ee7b7; text-decoration: none; }
-  .tag {
-    display: inline-block; font-size: 11px; padding: 2px 8px;
-    border-radius: 4px; margin-right: 8px;
-    background: #1f2937; color: #9ca3af;
-  }
-  .footer { margin-top: 30px; color: #555; font-size: 12px; }
-</style>
-</head>
-<body>
-<div class="card">
-  <h1>${BRAND} API</h1>
-  <p class="sub">Powered by ${PARENT_BRAND}</p>
-  <ul>
-    <li><span class="tag">POST</span><code>/api/generate</code> — generate a website</li>
-    <li><span class="tag">GET</span><code>/api/project?id=xxx</code> — fetch project</li>
-    <li><span class="tag">GET</span><code>/api/health</code> — health check</li>
-    <li><span class="tag">GET</span><code>/p/:id</code> — serve a generated site</li>
-  </ul>
-  <p class="sub" style="margin-top:24px;">
-    The editor lives at
-    <a href="https://vhostx.zone.id">vhostx.zone.id</a>
-  </p>
-  <div class="footer">Powered by ${PARENT_BRAND}</div>
-</div>
-</body>
-</html>`;
-}
-
-function notFoundPage(id: string): string {
-  return `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<title>Not Found — ${BRAND}</title>
-<style>
-  body {
-    font-family: system-ui, sans-serif;
-    background: #0a0a0a; color: #e8e8e8;
-    display: flex; align-items: center; justify-content: center;
-    min-height: 100vh; margin: 0; text-align: center;
-  }
-  h1 { font-size: 60px; margin: 0; color: #6ee7b7; }
-  p { color: #888; margin-top: 12px; }
-  code { background: #141414; padding: 2px 8px; border-radius: 4px; }
-  a { color: #6ee7b7; text-decoration: none; }
-</style>
-</head>
-<body>
-<div>
-  <h1>404</h1>
-  <p>Project <code>${escapeHtml(id)}</code> not found.</p>
-  <p style="margin-top:20px;">
-    <a href="https://vhostx.zone.id">← Back to ${BRAND}</a>
-  </p>
-</div>
-</body>
-</html>`;
-}
+const styles = `
+.app{display:flex;flex-direction:column;min-height:100vh}
+.header{padding:20px 40px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border)}
+.header-right{display:flex;align-items:center;gap:16px}
+.logo{font-size:20px;font-weight:700;letter-spacing:-.5px}
+.logo span{color:var(--accent)}
+.parent{font-size:12px;color:var(--muted)}
+.user-email{font-size:13px;color:var(--muted)}
+.main{flex:1;max-width:900px;margin:0 auto;padding:60px 24px;width:100%}
+h1{font-size:40px;font-weight:700;letter-spacing:-1px;margin-bottom:12px}
+h1 span{color:var(--accent)}
+.sub{color:var(--muted);font-size:17px;margin-bottom:40px;line-height:1.6}
+.input,.textarea{width:100%;padding:16px;font-size:16px;font-family:inherit;border:1px solid var(--border);border-radius:12px;background:var(--panel);color:var(--text)}
+.textarea{height:130px;resize:vertical}
+.input:focus,.textarea:focus{outline:none;border-color:var(--accent)}
+.input:disabled,.textarea:disabled{opacity:.6}
+.btn{margin-top:16px;padding:14px 28px;font-size:15px;font-weight:600;cursor:pointer;background:var(--accent);color:#000;border:none;border-radius:10px}
+.btn:hover:not(:disabled){opacity:.85}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn-ghost{background:transparent;color:var(--muted);border:1px solid var(--border);padding:8px 14px;border-radius:8px;cursor:pointer;font-size:13px}
+.btn-ghost:hover{color:var(--text);border-color:var(--text)}
+.status{color:var(--muted);font-size:14px;margin-top:20px}
+.error{color:#f87171;font-size:14px;margin-top:20px}
+.success{color:var(--accent);font-size:14px;margin-top:24px;margin-bottom:12px}
+.loading{display:flex;align-items:center;justify-content:center;min-height:100vh;color:var(--muted)}
+.preview{width:100%;height:560px;border:1px solid var(--border);border-radius:12px;background:#fff;margin-top:8px}
+.meta{margin-top:20px;padding:20px;background:var(--panel);border:1px solid var(--border);border-radius:12px;font-size:14px;line-height:1.7}
+.meta strong{color:var(--accent)}
+.meta code{background:#000;padding:2px 8px;border-radius:4px;color:var(--accent);font-size:13px}
+.footer{padding:24px;text-align:center;font-size:13px;color:var(--muted);border-top:1px solid var(--border)}
+.footer strong{color:var(--text)}
+`;
