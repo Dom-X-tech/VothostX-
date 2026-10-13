@@ -10,6 +10,21 @@ type User = { id: string; email: string; verified: number };
 type Result = { id: string; code: string; url: string };
 type Mode = "signin" | "signup" | "magic" | "sent" | "verify-failed";
 
+// Safe JSON parser — never crashes on empty/non-JSON responses
+async function safeJson(res: Response): Promise<any> {
+  const text = await res.text();
+  if (!text || text.trim() === "") {
+    throw new Error(`Server returned empty response (status ${res.status})`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(
+      `Server returned non-JSON (status ${res.status}): ${text.slice(0, 200)}`
+    );
+  }
+}
+
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [loadingMe, setLoadingMe] = useState(true);
@@ -36,7 +51,7 @@ export default function App() {
       fetch(`${API_URL}/api/auth/verify?token=${token}`, {
         credentials: "include",
       })
-        .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
+        .then(async (r) => ({ ok: r.ok, d: await safeJson(r) }))
         .then(({ ok, d }) => {
           if (ok && d.ok) {
             window.history.replaceState({}, "", "/");
@@ -46,9 +61,9 @@ export default function App() {
             setAuthErr(d.error || "Verification failed");
           }
         })
-        .catch(() => {
+        .catch((e) => {
           setMode("verify-failed");
-          setAuthErr("Verification failed");
+          setAuthErr(e instanceof Error ? e.message : "Verification failed");
         })
         .finally(() => setLoadingMe(false));
     } else {
@@ -61,7 +76,7 @@ export default function App() {
       const res = await fetch(`${API_URL}/api/auth/me`, {
         credentials: "include",
       });
-      const data = await res.json();
+      const data = await safeJson(res);
       setUser(data.user);
     } catch {
       setUser(null);
@@ -93,8 +108,8 @@ export default function App() {
         credentials: "include",
         body: JSON.stringify({ email, password }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(data.error || "Signup failed");
       setUser(data.user);
       setEmail("");
       setPassword("");
@@ -116,8 +131,8 @@ export default function App() {
         credentials: "include",
         body: JSON.stringify({ email, password }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(data.error || "Login failed");
       setUser(data.user);
       setEmail("");
       setPassword("");
@@ -138,8 +153,8 @@ export default function App() {
         credentials: "include",
         body: JSON.stringify({ email }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
+      const data = await safeJson(res);
+      if (!res.ok) throw new Error(data.error || "Failed to send link");
       setMode("sent");
       setAuthMsg("Check your inbox for a sign-in link.");
     } catch (e) {
@@ -150,10 +165,14 @@ export default function App() {
   }
 
   async function logout() {
-    await fetch(`${API_URL}/api/auth/logout`, {
-      method: "POST",
-      credentials: "include",
-    });
+    try {
+      await fetch(`${API_URL}/api/auth/logout`, {
+        method: "POST",
+        credentials: "include",
+      });
+    } catch {
+      // ignore
+    }
     setUser(null);
     setResult(null);
   }
@@ -170,7 +189,7 @@ export default function App() {
         credentials: "include",
         body: JSON.stringify({ prompt }),
       });
-      const data = await res.json();
+      const data = await safeJson(res);
       if (!res.ok) throw new Error(data.error || "Generation failed");
       setResult(data);
     } catch (e) {
@@ -188,6 +207,7 @@ export default function App() {
     );
   }
 
+  // ---------------- Auth screen ----------------
   if (!user) {
     return (
       <div className="app">
@@ -222,8 +242,16 @@ export default function App() {
           {(mode === "signin" || mode === "signup" || mode === "magic") && (
             <>
               <h1>
-                {mode === "signup" && <>Create your <span>{BRAND}</span> account</>}
-                {mode === "signin" && <>Welcome back to <span>{BRAND}</span></>}
+                {mode === "signup" && (
+                  <>
+                    Create your <span>{BRAND}</span> account
+                  </>
+                )}
+                {mode === "signin" && (
+                  <>
+                    Welcome back to <span>{BRAND}</span>
+                  </>
+                )}
                 {mode === "magic" && <>Sign in with email</>}
               </h1>
               <p className="sub">
@@ -250,7 +278,9 @@ export default function App() {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   disabled={authBusy}
-                  autoComplete={mode === "signup" ? "new-password" : "current-password"}
+                  autoComplete={
+                    mode === "signup" ? "new-password" : "current-password"
+                  }
                 />
               )}
 
@@ -291,22 +321,46 @@ export default function App() {
               <div className="auth-switch">
                 {mode === "signin" && (
                   <>
-                    <button className="link" onClick={() => { resetAuth(); setMode("signup"); }}>
+                    <button
+                      className="link"
+                      onClick={() => {
+                        resetAuth();
+                        setMode("signup");
+                      }}
+                    >
                       Create an account
                     </button>
                     <span className="dot">·</span>
-                    <button className="link" onClick={() => { resetAuth(); setMode("magic"); }}>
+                    <button
+                      className="link"
+                      onClick={() => {
+                        resetAuth();
+                        setMode("magic");
+                      }}
+                    >
                       Email me a link
                     </button>
                   </>
                 )}
                 {mode === "signup" && (
-                  <button className="link" onClick={() => { resetAuth(); setMode("signin"); }}>
+                  <button
+                    className="link"
+                    onClick={() => {
+                      resetAuth();
+                      setMode("signin");
+                    }}
+                  >
                     Already have an account? Sign in
                   </button>
                 )}
                 {mode === "magic" && (
-                  <button className="link" onClick={() => { resetAuth(); setMode("signin"); }}>
+                  <button
+                    className="link"
+                    onClick={() => {
+                      resetAuth();
+                      setMode("signin");
+                    }}
+                  >
                     Use password instead
                   </button>
                 )}
@@ -323,6 +377,7 @@ export default function App() {
     );
   }
 
+  // ---------------- Main app ----------------
   return (
     <div className="app">
       <header className="header">
@@ -353,7 +408,11 @@ export default function App() {
           disabled={loading}
         />
 
-        <button className="btn" onClick={generate} disabled={loading || !prompt.trim()}>
+        <button
+          className="btn"
+          onClick={generate}
+          disabled={loading || !prompt.trim()}
+        >
           {loading ? "Generating…" : "Generate Website"}
         </button>
 
@@ -420,7 +479,7 @@ h1 span{color:var(--accent)}
 .auth-switch{margin-top:20px;font-size:14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .dot{color:var(--muted)}
 .status{color:var(--muted);font-size:14px;margin-top:20px}
-.error{color:#f87171;font-size:14px;margin-top:16px}
+.error{color:#f87171;font-size:14px;margin-top:16px;line-height:1.5;word-break:break-word}
 .success{color:var(--accent);font-size:14px;margin-top:24px;margin-bottom:12px}
 .loading{display:flex;align-items:center;justify-content:center;min-height:100vh;color:var(--muted)}
 .preview{width:100%;height:560px;border:1px solid var(--border);border-radius:12px;background:#fff;margin-top:8px}
