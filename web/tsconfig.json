@@ -9,9 +9,7 @@
     "skipLibCheck": true,
     "noEmit": true,
     "isolatedModules": true,
-    "esModuleInterop": true,
-    "resolveJsonModule": true,
-    "types": ["@cloudflare/workers-types"]
+    "esModuleInterop": true
   },
-  "include": ["src", "worker"]
+  "include": ["src"]
 }
