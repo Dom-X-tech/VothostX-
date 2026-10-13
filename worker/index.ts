@@ -167,9 +167,24 @@ export default {
       if (path === "/api/projects" && request.method === "POST") {
         const user = await getSessionUser(request, env);
         if (!user) return json({ error: "Sign in required" }, 401, request);
-        const b = await request.json<{ prompt?: string }>();
+        const b = await request.json<{ name?: string; prompt?: string; files?: { path: string; content: string }[] }>();
+
+        // Manual project creation (no AI)
+        if (b.name && !b.prompt) {
+          const pid = crypto.randomUUID().slice(0, 8);
+          await env.DB.prepare("INSERT INTO projects (id, user_id, name, prompt) VALUES (?, ?, ?, ?)")
+            .bind(pid, user.id, b.name.slice(0, 60), "").run();
+          // Create default index.html
+          const fid = crypto.randomUUID();
+          const defaultContent = `<!DOCTYPE html>\n<html>\n<head>\n  <meta charset="utf-8">\n  <title>${b.name}</title>\n</head>\n<body>\n  <h1>${b.name}</h1>\n</body>\n</html>`;
+          await env.DB.prepare("INSERT INTO files (id, project_id, path, content) VALUES (?, ?, ?, ?)")
+            .bind(fid, pid, "index.html", defaultContent).run();
+          return json({ ok: true, project: { id: pid, name: b.name, prompt: "" } }, 200, request);
+        }
+
+        // AI project creation
         const prompt = b.prompt?.trim();
-        if (!prompt) return json({ error: "Prompt required" }, 400, request);
+        if (!prompt) return json({ error: "Prompt or name required" }, 400, request);
         if (!env.GROQ_API_KEY) return json({ error: "GROQ_API_KEY not configured" }, 500, request);
 
         const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
