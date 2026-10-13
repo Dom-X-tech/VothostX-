@@ -2,23 +2,49 @@ interface Env {
   DB: D1Database;
 }
 
-const BRAND = "VothostX";
-const PARENT_BRAND = "Alphatekx";
+const ALLOWED_ORIGINS = [
+  "https://vothostx.pages.dev",
+  "https://vhostx.zone.id",
+  "http://localhost:5173",
+];
+
+function cors(request: Request): Record<string, string> {
+  const origin = request.headers.get("origin") || "";
+  const allowed = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
+  return {
+    "Access-Control-Allow-Origin": allowed,
+    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Credentials": "true",
+    "Access-Control-Max-Age": "86400",
+  };
+}
+
+function json(body: unknown, status: number, request: Request): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json", ...cors(request) },
+  });
+}
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    if (request.method === "OPTIONS") {
+      return new Response(null, { headers: cors(request) });
+    }
+
     const url = new URL(request.url);
 
     if (url.pathname === "/api/health") {
-      return Response.json({
-        ok: true,
-        brand: BRAND,
-        parent: PARENT_BRAND,
-      });
+      return json(
+        { ok: true, brand: "VothostX", parent: "Alphatekx" },
+        200,
+        request
+      );
     }
 
     if (url.pathname.startsWith("/api/")) {
-      return Response.json({ error: "Not found" }, { status: 404 });
+      return json({ error: "Not found" }, 404, request);
     }
 
     if (url.pathname.startsWith("/p/")) {
@@ -34,13 +60,9 @@ export default {
           headers: { "content-type": "text/html;charset=utf-8" },
         });
       }
-
-      return new Response("Site not found", {
-        status: 404,
-        headers: { "content-type": "text/plain" },
-      });
+      return new Response("Site not found", { status: 404 });
     }
 
-    return new Response("Not found", { status: 404 });
+    return new Response("VothostX API", { status: 200 });
   },
 };
