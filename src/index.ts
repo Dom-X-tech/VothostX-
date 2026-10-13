@@ -1,5 +1,5 @@
 // ============================================================
-// VothostX Worker — Password + Magic-link auth, API, site host
+// VothostX Worker — Auth (no verify), API, site host
 // Powered by Alphatekx
 // ============================================================
 
@@ -16,9 +16,11 @@ const PROJECT_PATH_PREFIX = "/p/";
 const SESSION_COOKIE = "vx_session";
 const SESSION_DAYS = 30;
 const MAGIC_MINUTES = 15;
-const VERIFY_HOURS = 24;
-const FROM_EMAIL = "VothostX <onboarding@resend.dev>";
 const MIN_PASSWORD_LENGTH = 8;
+
+// The address Resend is allowed to email in testing mode
+const OWNER_EMAIL = "domx28718@gmail.com";
+const FROM_EMAIL = "VothostX <onboarding@resend.dev>";
 
 const ALLOWED_ORIGINS = [
   "https://vothostx.pages.dev",
@@ -120,13 +122,44 @@ async function verifyPassword(password: string, stored: string): Promise<boolean
     256
   );
   const computed = bytesToHex(new Uint8Array(bits));
-  // constant-time-ish compare
   if (computed.length !== hashHex.length) return false;
   let diff = 0;
   for (let i = 0; i < computed.length; i++) {
     diff |= computed.charCodeAt(i) ^ hashHex.charCodeAt(i);
   }
   return diff === 0;
+}
+
+// ---------- Send notification to owner ----------
+
+async function notifyOwner(
+  env: Env,
+  subject: string,
+  html: string
+): Promise<void> {
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.RESEND_API_KEY}`,
+        "User-Agent": "VothostX/1.0",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: FROM_EMAIL,
+        to: [OWNER_EMAIL],
+        subject,
+        html,
+      }),
+    });
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error("Resend notify error:", res.status, errText);
+    }
+  } catch (e) {
+    // Never let email failure break the request
+    console.error("notifyOwner failed:", e);
+  }
 }
 
 // ---------- Worker entry ----------
@@ -140,11 +173,11 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // ---- Serve generated sites ----
-    if (path.startsWith(PROJECT_PATH_PREFIX)) {
-      const id = path.slice(PROJECT_PATH_PREFIX.length).split("/")[0];
-      if (id) {
-        try {
+    try {
+      // Serve generated sites
+      if (path.startsWith(PROJECT_PATH_PREFIX)) {
+        const id = path.slice(PROJECT_PATH_PREFIX.length).split("/")[0];
+        if (id) {
           const project = await env.DB.prepare(
             "SELECT code FROM projects WHERE id = ?"
           )
@@ -155,54 +188,56 @@ export default {
               headers: { "content-type": "text/html;charset=utf-8" },
             });
           }
-        } catch (e) {
-          console.error("Project lookup error:", e);
+          return new Response(notFoundPage(id), {
+            status: 404,
+            headers: { "content-type": "text/html;charset=utf-8" },
+          });
         }
-        return new Response(notFoundPage(id), {
-          status: 404,
-          headers: { "content-type": "text/html;charset=utf-8" },
-        });
       }
-    }
 
-    // ---- Auth routes ----
-    if (path === "/api/auth/signup" && request.method === "POST") {
-      return authSignup(request, env);
-    }
-    if (path === "/api/auth/login" && request.method === "POST") {
-      return authLogin(request, env);
-    }
-    if (path === "/api/auth/request" && request.method === "POST") {
-      return authRequestMagic(request, env);
-    }
-    if (path === "/api/auth/verify" && request.method === "GET") {
-      return authVerify(request, env);
-    }
-    if (path === "/api/auth/me" && request.method === "GET") {
-      return authMe(request, env);
-    }
-    if (path === "/api/auth/logout" && request.method === "POST") {
-      return authLogout(request, env);
-    }
+      // Auth
+      if (path === "/api/auth/signup" && request.method === "POST") {
+        return authSignup(request, env);
+      }
+      if (path === "/api/auth/login" && request.method === "POST") {
+        return authLogin(request, env);
+      }
+      if (path === "/api/auth/request" && request.method === "POST") {
+        return authRequestMagic(request, env);
+      }
+      if (path === "/api/auth/verify" && request.method === "GET") {
+        return authVerify(request, env);
+      }
+      if (path === "/api/auth/me" && request.method === "GET") {
+        return authMe(request, env);
+      }
+      if (path === "/api/auth/logout" && request.method === "POST") {
+        return authLogout(request, env);
+      }
 
-    // ---- Project routes ----
-    if (path === "/api/generate" && request.method === "POST") {
-      return generateSite(request, env);
-    }
-    if (path === "/api/projects" && request.method === "GET") {
-      return listProjects(request, env);
-    }
-    if (path === "/api/project" && request.method === "GET") {
-      return getProject(request, env);
-    }
+      // Projects
+      if (path === "/api/generate" && request.method === "POST") {
+        return generateSite(request, env);
+      }
+      if (path === "/api/projects" && request.method === "GET") {
+        return listProjects(request, env);
+      }
+      if (path === "/api/project" && request.method === "GET") {
+        return getProject(request, env);
+      }
 
-    if (path === "/api/health") {
-      return json({ ok: true, brand: BRAND, parent: PARENT_BRAND }, 200, request);
-    }
+      if (path === "/api/health") {
+        return json({ ok: true, brand: BRAND, parent: PARENT_BRAND }, 200, request);
+      }
 
-    return new Response(rootPage(), {
-      headers: { "content-type": "text/html;charset=utf-8" },
-    });
+      return new Response(rootPage(), {
+        headers: { "content-type": "text/html;charset=utf-8" },
+      });
+    } catch (err) {
+      console.error("Unhandled error:", err);
+      const message = err instanceof Error ? err.message : String(err);
+      return json({ error: `Server error: ${message}` }, 500, request);
+    }
   },
 };
 
@@ -263,7 +298,7 @@ function clearCookie(): string {
 }
 
 // ============================================================
-// AUTH — SIGNUP
+// AUTH — SIGNUP (no email verification, signs in immediately)
 // ============================================================
 
 async function authSignup(request: Request, env: Env): Promise<Response> {
@@ -288,13 +323,11 @@ async function authSignup(request: Request, env: Env): Promise<Response> {
     );
   }
 
-  const existing = await env.DB.prepare(
-    "SELECT id, verified FROM users WHERE email = ?"
-  )
+  const existing = await env.DB.prepare("SELECT id FROM users WHERE email = ?")
     .bind(email)
-    .first<{ id: string; verified: number }>();
+    .first<{ id: string }>();
 
-  if (existing && existing.verified) {
+  if (existing) {
     return json(
       { error: "Account already exists. Please sign in." },
       409,
@@ -303,67 +336,50 @@ async function authSignup(request: Request, env: Env): Promise<Response> {
   }
 
   const passwordHash = await hashPassword(password);
-
-  let userId: string;
-  if (existing) {
-    // User existed but wasn't verified — update password and resend verification
-    userId = existing.id;
-    await env.DB.prepare("UPDATE users SET password_hash = ? WHERE id = ?")
-      .bind(passwordHash, userId)
-      .run();
-  } else {
-    userId = crypto.randomUUID();
-    await env.DB.prepare(
-      "INSERT INTO users (id, email, password_hash, verified) VALUES (?, ?, ?, 0)"
-    )
-      .bind(userId, email, passwordHash)
-      .run();
-  }
-
-  // Send verification email
-  const token = randomToken(32);
-  const expiresAt = Math.floor(Date.now() / 1000) + VERIFY_HOURS * 3600;
+  const userId = crypto.randomUUID();
 
   await env.DB.prepare(
-    "INSERT INTO magic_tokens (token, user_id, expires_at, used) VALUES (?, ?, ?, 0)"
+    "INSERT INTO users (id, email, password_hash, verified) VALUES (?, ?, ?, 1)"
   )
-    .bind(token, userId, expiresAt)
+    .bind(userId, email, passwordHash)
     .run();
 
-  const origin = request.headers.get("origin") || "https://vothostx.pages.dev";
-  const link = `${origin}/verify?token=${token}`;
+  // Create session immediately — no verification step
+  const sid = await createSession(userId, env);
 
-  const emailRes = await fetch("https://api.resend.com/emails", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.RESEND_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      from: FROM_EMAIL,
-      to: [email],
-      subject: `Verify your ${BRAND} account`,
-      html: verifyEmailHtml(link),
-    }),
-  });
+  // Notify the owner (fire and forget — never blocks signup)
+  const ip = request.headers.get("cf-connecting-ip") || "unknown";
+  const country = request.headers.get("cf-ipcountry") || "unknown";
+  const ua = request.headers.get("user-agent") || "unknown";
+  const when = new Date().toISOString();
 
-  if (!emailRes.ok) {
-    const errText = await emailRes.text();
-    console.error("Resend error:", emailRes.status, errText);
-    return json(
-      { error: `Email send failed: ${errText.slice(0, 200)}` },
-      500,
-      request
-    );
-  }
+  const html = `
+    <div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:520px;">
+      <h2 style="color:#0a0a0a;margin:0 0 12px;">New ${BRAND} signup</h2>
+      <p style="color:#555;line-height:1.6;">Someone just created an account.</p>
+      <table style="border-collapse:collapse;width:100%;margin-top:16px;">
+        <tr><td style="padding:8px 12px;background:#f5f5f5;border-radius:6px 0 0 0;"><strong>Email</strong></td><td style="padding:8px 12px;">${email}</td></tr>
+        <tr><td style="padding:8px 12px;background:#f5f5f5;"><strong>User ID</strong></td><td style="padding:8px 12px;"><code>${userId}</code></td></tr>
+        <tr><td style="padding:8px 12px;background:#f5f5f5;"><strong>Time</strong></td><td style="padding:8px 12px;">${when}</td></tr>
+        <tr><td style="padding:8px 12px;background:#f5f5f5;"><strong>IP</strong></td><td style="padding:8px 12px;">${ip}</td></tr>
+        <tr><td style="padding:8px 12px;background:#f5f5f5;"><strong>Country</strong></td><td style="padding:8px 12px;">${country}</td></tr>
+        <tr><td style="padding:8px 12px;background:#f5f5f5;"><strong>User Agent</strong></td><td style="padding:8px 12px;font-size:12px;color:#666;">${ua}</td></tr>
+      </table>
+      <p style="color:#999;font-size:12px;margin-top:20px;border-top:1px solid #eee;padding-top:12px;">Powered by ${PARENT_BRAND}</p>
+    </div>
+  `;
+
+  await notifyOwner(env, `New signup: ${email}`, html);
 
   return json(
     {
       ok: true,
-      message: "Account created. Check your inbox to verify your email.",
+      user: { id: userId, email, verified: 1 },
+      message: "Account created.",
     },
     200,
-    request
+    request,
+    { "Set-Cookie": sessionCookie(sid) }
   );
 }
 
@@ -387,15 +403,10 @@ async function authLogin(request: Request, env: Env): Promise<Response> {
   }
 
   const user = await env.DB.prepare(
-    "SELECT id, email, password_hash, verified FROM users WHERE email = ?"
+    "SELECT id, email, password_hash FROM users WHERE email = ?"
   )
     .bind(email)
-    .first<{
-      id: string;
-      email: string;
-      password_hash: string | null;
-      verified: number;
-    }>();
+    .first<{ id: string; email: string; password_hash: string | null }>();
 
   if (!user || !user.password_hash) {
     return json({ error: "Invalid email or password" }, 401, request);
@@ -406,21 +417,10 @@ async function authLogin(request: Request, env: Env): Promise<Response> {
     return json({ error: "Invalid email or password" }, 401, request);
   }
 
-  if (!user.verified) {
-    return json(
-      { error: "Please verify your email first. Check your inbox." },
-      403,
-      request
-    );
-  }
-
   const sid = await createSession(user.id, env);
 
   return json(
-    {
-      ok: true,
-      user: { id: user.id, email: user.email, verified: user.verified },
-    },
+    { ok: true, user: { id: user.id, email: user.email, verified: 1 } },
     200,
     request,
     { "Set-Cookie": sessionCookie(sid) }
@@ -428,7 +428,7 @@ async function authLogin(request: Request, env: Env): Promise<Response> {
 }
 
 // ============================================================
-// AUTH — MAGIC LINK REQUEST
+// AUTH — MAGIC LINK (still sends link to user's inbox — fails for non-owner)
 // ============================================================
 
 async function authRequestMagic(request: Request, env: Env): Promise<Response> {
@@ -444,11 +444,10 @@ async function authRequestMagic(request: Request, env: Env): Promise<Response> {
     return json({ error: "Valid email required" }, 400, request);
   }
 
-  const user = await env.DB.prepare("SELECT id, email FROM users WHERE email = ?")
+  const user = await env.DB.prepare("SELECT id FROM users WHERE email = ?")
     .bind(email)
-    .first<{ id: string; email: string }>();
+    .first<{ id: string }>();
 
-  // Don't leak whether the account exists — always respond success
   if (!user) {
     return json(
       { ok: true, message: "If that account exists, a link has been sent." },
@@ -469,10 +468,12 @@ async function authRequestMagic(request: Request, env: Env): Promise<Response> {
   const origin = request.headers.get("origin") || "https://vothostx.pages.dev";
   const link = `${origin}/verify?token=${token}`;
 
+  // Try sending to the user. Will fail unless user is the owner.
   const emailRes = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${env.RESEND_API_KEY}`,
+      "User-Agent": "VothostX/1.0",
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
@@ -485,10 +486,23 @@ async function authRequestMagic(request: Request, env: Env): Promise<Response> {
 
   if (!emailRes.ok) {
     const errText = await emailRes.text();
-    console.error("Resend error:", emailRes.status, errText);
+    console.error("Resend magic error:", errText);
+
+    // Fallback: notify owner with the link so they can forward it
+    await notifyOwner(
+      env,
+      `Magic link requested for ${email}`,
+      `<p>Someone requested a magic link for <strong>${email}</strong>.</p>
+       <p>Link: <a href="${link}">${link}</a></p>`
+    );
+
     return json(
-      { error: `Email send failed: ${errText.slice(0, 200)}` },
-      500,
+      {
+        ok: true,
+        message:
+          "If that account exists, a link has been sent. (Testing mode: the owner has been notified.)",
+      },
+      200,
       request
     );
   }
@@ -501,7 +515,7 @@ async function authRequestMagic(request: Request, env: Env): Promise<Response> {
 }
 
 // ============================================================
-// AUTH — VERIFY (works for both signup-verify and magic link)
+// AUTH — VERIFY (used by magic links)
 // ============================================================
 
 async function authVerify(request: Request, env: Env): Promise<Response> {
@@ -522,9 +536,6 @@ async function authVerify(request: Request, env: Env): Promise<Response> {
 
   await env.DB.prepare("UPDATE magic_tokens SET used = 1 WHERE token = ?")
     .bind(token)
-    .run();
-  await env.DB.prepare("UPDATE users SET verified = 1 WHERE id = ?")
-    .bind(row.user_id)
     .run();
 
   const sid = await createSession(row.user_id, env);
@@ -672,50 +683,17 @@ async function getProject(request: Request, env: Env): Promise<Response> {
 // Email templates
 // ============================================================
 
-function verifyEmailHtml(link: string): string {
-  return `<!DOCTYPE html>
-<html><body style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f5f5f5;padding:40px 20px;">
-  <div style="max-width:480px;margin:0 auto;background:#fff;border-radius:12px;padding:32px;">
-    <h2 style="margin:0 0 12px;color:#0a0a0a;">Verify your ${BRAND} account</h2>
-    <p style="color:#555;line-height:1.6;">
-      Click the button below to verify your email and finish signing up. This link expires in ${VERIFY_HOURS} hours.
-    </p>
-    <p style="text-align:center;margin:32px 0;">
-      <a href="${link}" style="background:#10b981;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block;">
-        Verify email
-      </a>
-    </p>
-    <p style="color:#999;font-size:12px;margin-top:32px;">
-      Or paste this into your browser:<br>
-      <span style="color:#10b981;word-break:break-all;">${link}</span>
-    </p>
-    <p style="color:#999;font-size:12px;border-top:1px solid #eee;padding-top:16px;margin-top:24px;">
-      Powered by ${PARENT_BRAND}
-    </p>
-  </div>
-</body></html>`;
-}
-
 function magicEmailHtml(link: string): string {
   return `<!DOCTYPE html>
 <html><body style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f5f5f5;padding:40px 20px;">
   <div style="max-width:480px;margin:0 auto;background:#fff;border-radius:12px;padding:32px;">
     <h2 style="margin:0 0 12px;color:#0a0a0a;">Sign in to ${BRAND}</h2>
-    <p style="color:#555;line-height:1.6;">
-      Click the button below to sign in. This link expires in ${MAGIC_MINUTES} minutes and can only be used once.
-    </p>
+    <p style="color:#555;line-height:1.6;">Click below to sign in. Expires in ${MAGIC_MINUTES} minutes.</p>
     <p style="text-align:center;margin:32px 0;">
-      <a href="${link}" style="background:#10b981;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block;">
-        Sign in
-      </a>
+      <a href="${link}" style="background:#10b981;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block;">Sign in</a>
     </p>
-    <p style="color:#999;font-size:12px;margin-top:32px;">
-      Or paste this into your browser:<br>
-      <span style="color:#10b981;word-break:break-all;">${link}</span>
-    </p>
-    <p style="color:#999;font-size:12px;border-top:1px solid #eee;padding-top:16px;margin-top:24px;">
-      Powered by ${PARENT_BRAND}
-    </p>
+    <p style="color:#999;font-size:12px;">Or paste: <span style="color:#10b981;word-break:break-all;">${link}</span></p>
+    <p style="color:#999;font-size:12px;border-top:1px solid #eee;padding-top:16px;margin-top:24px;">Powered by ${PARENT_BRAND}</p>
   </div>
 </body></html>`;
 }
