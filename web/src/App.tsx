@@ -14,7 +14,6 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [loadingMe, setLoadingMe] = useState(true);
 
-  // Auth UI state
   const [mode, setMode] = useState<Mode>("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -23,13 +22,11 @@ export default function App() {
   const [authMsg, setAuthMsg] = useState("");
   const [authErr, setAuthErr] = useState("");
 
-  // Generator state
   const [prompt, setPrompt] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
   const [error, setError] = useState("");
 
-  // Handle /verify?token=xxx on first load
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const token = params.get("token");
@@ -97,14 +94,9 @@ export default function App() {
         body: JSON.stringify({ email, password }),
       });
       const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || `Signup failed (${res.status}). Please try again.`);
-      }
-      if (!data.ok) {
-        throw new Error(data.error || "Signup failed. Please try again.");
-      }
-      setMode("sent");
-      setAuthMsg("Account created. Check your inbox to verify your email.");
+      if (!res.ok) throw new Error(data.error);
+      setUser(data.user);
+      setEmail("");
       setPassword("");
       setConfirm("");
     } catch (e) {
@@ -196,7 +188,6 @@ export default function App() {
     );
   }
 
-  // ---------------- Auth screen ----------------
   if (!user) {
     return (
       <div className="app">
@@ -236,67 +227,64 @@ export default function App() {
                 {mode === "magic" && <>Sign in with email</>}
               </h1>
               <p className="sub">
-                {mode === "signup" && "Sign up to save and manage your sites."}
+                {mode === "signup" && "Sign up and start generating instantly."}
                 {mode === "signin" && "Enter your email and password to continue."}
                 {mode === "magic" && "We'll email you a one-time sign-in link."}
               </p>
 
-              <form
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  if (mode === "signup") void doSignup();
-                  else if (mode === "signin") void doLogin();
-                  else void doMagicLink();
-                }}
-              >
+              <input
+                className="input"
+                type="email"
+                placeholder="you@example.com"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                disabled={authBusy}
+                autoComplete="email"
+              />
+
+              {mode !== "magic" && (
                 <input
-                  className="input"
-                  type="email"
-                  placeholder="you@example.com"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
+                  className="input mt"
+                  type="password"
+                  placeholder="Password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
                   disabled={authBusy}
-                  autoComplete="email"
-                  required
+                  autoComplete={mode === "signup" ? "new-password" : "current-password"}
                 />
+              )}
 
-                {mode !== "magic" && (
-                  <input
-                    className="input mt"
-                    type="password"
-                    placeholder="Password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    disabled={authBusy}
-                    autoComplete={mode === "signup" ? "new-password" : "current-password"}
-                    required
-                    minLength={mode === "signup" ? 8 : undefined}
-                  />
-                )}
+              {mode === "signup" && (
+                <input
+                  className="input mt"
+                  type="password"
+                  placeholder="Confirm password"
+                  value={confirm}
+                  onChange={(e) => setConfirm(e.target.value)}
+                  disabled={authBusy}
+                  autoComplete="new-password"
+                />
+              )}
 
-                {mode === "signup" && (
-                  <input
-                    className="input mt"
-                    type="password"
-                    placeholder="Confirm password"
-                    value={confirm}
-                    onChange={(e) => setConfirm(e.target.value)}
-                    disabled={authBusy}
-                    autoComplete="new-password"
-                    required
-                  />
-                )}
-
-                <button className="btn" type="submit" disabled={authBusy}>
-                  {authBusy
-                    ? "Working…"
-                    : mode === "signup"
-                    ? "Create account"
+              <button
+                className="btn"
+                disabled={authBusy || !email.trim()}
+                onClick={
+                  mode === "signup"
+                    ? doSignup
                     : mode === "signin"
-                    ? "Sign in"
-                    : "Send sign-in link"}
-                </button>
-              </form>
+                    ? doLogin
+                    : doMagicLink
+                }
+              >
+                {authBusy
+                  ? "Working…"
+                  : mode === "signup"
+                  ? "Create account"
+                  : mode === "signin"
+                  ? "Sign in"
+                  : "Send sign-in link"}
+              </button>
 
               {authErr && <p className="error">{authErr}</p>}
 
@@ -335,7 +323,6 @@ export default function App() {
     );
   }
 
-  // ---------------- Main app ----------------
   return (
     <div className="app">
       <header className="header">
