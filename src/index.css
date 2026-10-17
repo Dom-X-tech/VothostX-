@@ -104,3 +104,128 @@
   .editor-layout { grid-template-columns: 1fr; height: auto; }
   .preview-side { display: none; }
 }
+
+/* ---------- Larger code area ---------- */
+.code-area-large {
+  min-height: 500px;
+  font-size: 14px;
+  line-height: 1.65;
+  padding: 20px;
+}
+
+@media (max-width: 900px) {
+  .code-area-large { min-height: 360px; }
+}
+
+/* ---------- Editor file info row ---------- */
+.editor-file-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.changed-tag {
+  font-size: 12px;
+  color: #fbbf24;
+  font-weight: 500;
+}
+
+.saved-tag {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+/* ---------- GitHub-style commit bar ---------- */
+.commit-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin-top: 4px;
+}
+
+.commit-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+}
+
+.commit-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.commit-info > div:last-child {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.commit-branch {
+  font-size: 11px;
+  color: var(--muted);
+  font-family: monospace;
+  font-weight: 500;
+}
+
+.commit-message {
+  font-size: 13px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.commit-btn {
+  padding: 10px 20px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 8px;
+  cursor: pointer;
+  font-family: inherit;
+  border: 1px solid var(--border-strong);
+  background: var(--panel);
+  color: var(--muted);
+  transition: all 150ms;
+  white-space: nowrap;
+}
+
+.commit-btn.active {
+  background: var(--accent);
+  color: #000;
+  border-color: var(--accent);
+}
+
+.commit-btn.active:hover:not(:disabled) {
+  background: var(--accent-hover);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.25);
+}
+
+.commit-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ---------- Improve editor main area ---------- */
+.editor-main {
+  padding: 20px 24px;
+  gap: 14px;
+}
