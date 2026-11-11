@@ -2,6 +2,9 @@
   "name": "vothostx",
   "main": "worker/index.ts",
   "compatibility_date": "2025-04-01",
+  "secrets": {
+    "required": ["GROQ_API_KEY", "RESEND_API_KEY"]
+  },
   "d1_databases": [
     {
       "binding": "DB",
